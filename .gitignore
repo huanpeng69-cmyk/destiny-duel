@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.cache/
+*.log
+.DS_Store
+src/data/yaml-yugi.cards.json
