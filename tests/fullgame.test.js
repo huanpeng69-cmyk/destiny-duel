@@ -114,8 +114,8 @@ test('场上的怪兽数量始终不超过槽位数', async () => {
     if (state.ctx.gameover) break;
     for (const id of ['0', '1']) {
       const f = state.G.players[id].field;
-      assert.equal(f.length, 3, '每个玩家固定 3 个槽位');
-      assert.ok(f.filter(Boolean).length <= 3, '怪兽数不能超过槽位数');
+      assert.equal(f.length, 5, '每个玩家固定 5 个槽位');
+      assert.ok(f.filter(Boolean).length <= 5, '怪兽数不能超过槽位数');
     }
     const current = state.ctx.currentPlayer;
     const client = current === '0' ? c0 : c1;
@@ -125,4 +125,34 @@ test('场上的怪兽数量始终不超过槽位数', async () => {
   }
   c0.stop();
   c1.stop();
+});
+
+// ---- 先后手随机（回归测试，2026-03）----
+// 踩坑根因：matchID 固定为 'duel-0' 时，Local() 用它派生确定性种子，
+// random.Shuffle([0,1])[0] 每次返回同一个值 → 永远是同一方先发。
+// 玩家反馈「每次都对手先」，实测 A/B 对照确认（10/10 局 AI 先发）。
+// 修复：index.jsx 给 matchID 加页面加载时间戳。
+// 防再犯：不同 matchID 必须产生不同先发，否则这条回归。
+test('先后手随机：不同 matchID 应产生不同先发方（防固定先发回归）', async () => {
+  const firsts = new Set();
+  // 取 12 个不同 matchID；只要出现两种先发方就说明随机生效
+  for (let i = 0; i < 12; i++) {
+    const mp = Local();
+    const c = Client({
+      game: DestinyDuel,
+      multiplayer: mp,
+      matchID: `duel-0-${(10000 + i * 37).toString(36)}`,
+      playerID: '0',
+      debug: false,
+    });
+    c.start();
+    await new Promise((r) => setTimeout(r, 20));
+    firsts.add(c.getState().ctx.currentPlayer);
+    c.stop();
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.ok(
+    firsts.size > 1,
+    `不同 matchID 的先发方应随机变化，实际只有 ${JSON.stringify([...firsts])}`
+  );
 });

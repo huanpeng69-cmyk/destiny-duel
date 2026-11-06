@@ -17,6 +17,8 @@ import {
   toBattleBlocked,
   changePositionBlocked,
 } from './hints.js';
+import { specialSummonPlan, graveSummonPlan } from './hints.js';
+import { EFFECT_LABELS, canDirectAttack } from './effects.js';
 import { sfx, ensureUnlocked } from './sfx.js';
 
 const opponentOf = (id) => (id === '0' ? '1' : '0');
@@ -36,6 +38,12 @@ function CardFace({ cardId, size = 'md' }) {
       style={{ '--attr': attr.color, '--edge': attr.edge }}
     >
       <div className="card-name">{card.cn}</div>
+      {/* 怪兽效果角标：让玩家一眼看出这张卡带效果（文本见悬停详情） */}
+      {card.monsterEffect && (
+        <span className={`card-effect eff-${card.monsterEffect}`}>
+          {EFFECT_LABELS[card.monsterEffect] || '效果'}
+        </span>
+      )}
       <div className="card-art">
         <span className="card-glyph">{attr.glyph}</span>
         <img
@@ -67,15 +75,84 @@ function CardBack() {
   return <div className="card-back" aria-hidden="true" />;
 }
 
+// ---- 悬停/聚焦时的卡牌详情（跟随鼠标） ----
+// 纯展示层（pointer-events: none），移出卡牌/失焦即消失，不拦截点击。
+// 内容来源：CARDS[cardId]（cards.js 的卡库），desc 为效果文本、cn 为中文名。
+// 坐标：由触发点上报的鼠标视口坐标 x/y；向右下偏移，越界时自动翻转。
+const INSPECT_OFFSET = 16; // 鼠标到浮层边缘的偏移（px）
+const INSPECT_MARGIN = 8; // 与视口边缘的最小间距（px）
+const INSPECT_MAX_W = 320;
+const INSPECT_EST_H = 150; // 预估高度，仅用于判断下方是否放得下
+
+function CardInspect({ cardId, x, y }) {
+  const card = CARDS[cardId];
+  if (!card) return null;
+  const attr = ATTRIBUTES[card.attribute] || ATTRIBUTES.EARTH;
+  const isSpell = ['spell', 'trap'].includes(card.type);
+
+  // 默认放在鼠标右下方；右侧/下方空间不足时翻转到左/上侧
+  const vw = typeof window !== 'undefined' ? window.innerWidth : 1024;
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 768;
+
+  let left = x + INSPECT_OFFSET;
+  if (left + INSPECT_MAX_W + INSPECT_MARGIN > vw) {
+    left = Math.max(INSPECT_MARGIN, x - INSPECT_OFFSET - INSPECT_MAX_W);
+  }
+
+  let top = y + INSPECT_OFFSET;
+  if (top + INSPECT_EST_H + INSPECT_MARGIN > vh) {
+    top = Math.max(INSPECT_MARGIN, y - INSPECT_OFFSET - INSPECT_EST_H);
+  }
+
+  return (
+    <div
+      className="card-inspect"
+      role="tooltip"
+      style={{ left: `${left}px`, top: `${top}px`, '--attr': attr.color, '--edge': attr.edge }}
+    >
+      <div className="card-inspect-head">
+        <span className="card-inspect-name">{card.cn}</span>
+        <span className="card-inspect-type">{isSpell ? (card.type === 'trap' ? '陷阱' : '魔法') : '怪兽'}</span>
+      </div>
+      <div className="card-inspect-meta">
+        <span className="card-inspect-attr">{attr.glyph} {attr.label}</span>
+        {isSpell ? (
+          <span>{card.desc ? '效果卡' : '通常魔法'}</span>
+        ) : (
+          <>
+            <span>{card.level ?? '—'} 星</span>
+            <span>攻 {card.atk}</span>
+            <span>防 {card.def}</span>
+          </>
+        )}
+      </div>
+      <p className="card-inspect-text">{card.desc || '暂无效果说明。'}</p>
+    </div>
+  );
+}
+
 // ---- 场上的一个槽位 ----
-function Slot({ entry, side, onClick, highlight }) {
+function Slot({ entry, side, onClick, highlight, onInspect, onInspectMove }) {
   const clickable = Boolean(onClick);
   return (
     <button
       type="button"
-      className={['slot', `slot-${side}`, highlight ? 'is-target' : ''].join(' ')}
-      onClick={onClick}
-      disabled={!clickable}
+      className={[
+        'slot',
+        `slot-${side}`,
+        entry ? 'has-card' : '',
+        clickable ? 'is-clickable' : '',
+        highlight ? 'is-target' : '',
+      ]
+        .join(' ')
+        .trim()}
+      onClick={clickable ? onClick : undefined}
+      aria-disabled={!clickable}
+      onMouseEnter={entry && onInspect ? (e) => onInspect(entry.card, e) : undefined}
+      onMouseMove={entry && onInspectMove ? (e) => onInspectMove(entry.card, e) : undefined}
+      onMouseLeave={entry && onInspect ? () => onInspect(null) : undefined}
+      onFocus={entry && onInspect ? (e) => onInspect(entry.card, e) : undefined}
+      onBlur={entry && onInspect ? () => onInspect(null) : undefined}
     >
       {entry ? (
         <>
@@ -134,19 +211,29 @@ function Stage({ ev, playerID }) {
 
   if (ev.kind === 'attack') {
     const tone =
-      ev.outcome === 'direct' || ev.outcome === 'win'
+      ev.outcome === 'direct' || ev.outcome === 'win' || ev.outcome === 'wall'
         ? 'is-win'
         : ev.outcome === 'lose'
           ? 'is-lose'
           : 'is-draw';
     const verdict =
       ev.outcome === 'direct'
-        ? `直接攻击 -${ev.dmg}`
-        : ev.outcome === 'win'
-          ? `破坏 -${ev.dmg}`
-          : ev.outcome === 'lose'
-            ? `被反杀 -${ev.dmg}`
-            : '同归于尽';
+        ? ev.direct
+          ? `直击 -${ev.dmg}（无视对方怪兽）`
+          : `直接攻击 -${ev.dmg}`
+        : ev.outcome === 'wall'
+          ? ev.pierced
+            ? `贯通破壁 -${ev.dmg}`
+            : '破壁（守备表示怪兽被破坏不造成伤害）'
+          : ev.outcome === 'win'
+            ? ev.protected
+              ? `造成 -${ev.dmg}（对方免疫破坏）`
+              : `破坏 -${ev.dmg}`
+            : ev.outcome === 'lose'
+              ? `被反杀 -${ev.dmg}`
+              : '同归于尽';
+    // 战斗强化（battleBoost）生效时，在结果旁标出实际攻击力，让数值可解释
+    const boostNote = ev.boost ? ` · 攻 ${ev.boost}` : '';
     return (
       <div className="stage-inner">
         <div className="stage-duel">
@@ -166,7 +253,7 @@ function Stage({ ev, playerID }) {
             )}
           </div>
         </div>
-        <div className={`stage-outcome ${tone}`}>{verdict}</div>
+        <div className={`stage-outcome ${tone}`}>{verdict}{boostNote}</div>
       </div>
     );
   }
@@ -189,11 +276,39 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
 
   const [msg, setMsg] = useState('点手牌召唤怪兽或发动魔法/陷阱。');
   const [selectedAtk, setSelectedAtk] = useState(null);
-  // 等待选择表示形式的召唤：{ handIdx, slot }
+  // 等待选择表示形式的召唤：{ handIdx, slot, name, tributes, mode? }
+  // mode === 'special' 时走特殊召唤（不占通常召唤名额）
   const [pendingSummon, setPendingSummon] = useState(null);
+  // 等待选择表示形式的墓地复活：{ graveIdx, name }
+  const [pendingGrave, setPendingGrave] = useState(null);
+  // 悬停查看的卡牌与鼠标坐标：{ id, x, y } | null
+  const [inspect, setInspect] = useState(null);
   const [popup, setPopup] = useState(null);
   const [dmgFloat, setDmgFloat] = useState({ '0': 0, '1': 0 });
   const [shake, setShake] = useState(false);
+
+  // 悬停查看：鼠标事件里取坐标，键盘聚焦时取元素中心
+  const showInspectAt = useCallback((cardId, clientX, clientY) => {
+    if (!cardId) return;
+    setInspect({ id: cardId, x: clientX, y: clientY });
+  }, []);
+  const showInspect = useCallback((cardId, event) => {
+    if (!cardId) return;
+    if (event && typeof event.clientX === 'number') {
+      showInspectAt(cardId, event.clientX, event.clientY);
+      return;
+    }
+    // 键盘聚焦（无鼠标坐标）：定位到聚焦元素中心
+    const rect = event?.currentTarget?.getBoundingClientRect?.();
+    if (rect) showInspectAt(cardId, rect.right, rect.top + rect.height / 2);
+    else showInspectAt(cardId, 0, 0);
+  }, [showInspectAt]);
+  const hideInspect = useCallback(() => setInspect(null), []);
+  // 鼠标在卡牌内移动时同步浮层位置
+  const trackInspect = useCallback((cardId, event) => {
+    if (!cardId || !event) return;
+    showInspectAt(cardId, event.clientX, event.clientY);
+  }, [showInspectAt]);
 
   const lastFxId = useRef(0);
   const prevLp = useRef({ '0': me.lp, '1': foe.lp });
@@ -228,6 +343,11 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
     } else if (ev.kind === 'spell') {
       sfx.spell();
       if (!mine) showStage(ev);
+    } else if (ev.kind === 'effect') {
+      if (ev.effect === 'destroyBurn') sfx.hit();
+      else if (ev.effect === 'summonDraw') sfx.draw();
+      else sfx.spell();
+      showStage(ev);
     } else if (ev.kind === 'attack') {
       sfx.attack();
       if (ev.dmg > 0) {
@@ -294,20 +414,60 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
     }
 
     const plan = planSummon(me, cardId);
+    if (plan.ok) {
+      // 先问表示形式：这是真实的决策，两步比猜更清楚
+      setPendingSummon({ handIdx: idx, slot: plan.slot, name: card.cn, tributes: plan.tributes.length });
+      say(`选择 ${card.cn} 的表示形式。`);
+      return;
+    }
+    // 通常召唤走不通时，带特召标记的卡给一条特殊召唤路（不占通常召唤名额）
+    if (card.canSpecialSummon) {
+      const sp = specialSummonPlan(me, cardId);
+      if (sp.ok) {
+        setPendingSummon({ handIdx: idx, slot: sp.slot, name: card.cn, tributes: sp.tributeSlots.length, mode: 'special' });
+        say(`${card.cn} 现在不能通常召唤，可以特殊召唤。选择表示形式。`);
+        return;
+      }
+      deny(sp.reason);
+      return;
+    }
+    deny(plan.reason);
+  };
+
+  // 墓地复活：点在墓地里的可特召怪兽 -> 选表示形式（代价 1 张手牌）
+  const onGraveClick = (i) => {
+    ensureUnlocked();
+    if (!isActive || ctx.gameover || G.step !== 'main') return;
+    const cardId = me.graveyard[i];
+    const plan = graveSummonPlan(me, cardId);
     if (!plan.ok) {
       deny(plan.reason);
       return;
     }
-    // 先问表示形式：这是真实的决策，两步比猜更清楚
-    setPendingSummon({ handIdx: idx, slot: plan.slot, name: card.cn, tributes: plan.tributes.length });
-    say(`选择 ${card.cn} 的表示形式。`);
+    sfx.click();
+    setPendingGrave({ graveIdx: i, name: CARDS[cardId].cn });
+    say(`选择 ${CARDS[cardId].cn} 复活的表示形式。`);
+  };
+
+  const confirmGraveSummon = (pos) => {
+    if (!pendingGrave) return;
+    const { graveIdx, name } = pendingGrave;
+    setPendingGrave(null);
+    sfx.click();
+    moves.graveSummon(graveIdx, pos);
+    say(`以${pos === 'defense' ? '守备' : '攻击'}表示从墓地复活 ${name}。`);
   };
 
   const confirmSummon = (pos) => {
     if (!pendingSummon) return;
-    const { handIdx, slot, name } = pendingSummon;
+    const { handIdx, slot, name, mode } = pendingSummon;
     setPendingSummon(null);
     sfx.click();
+    if (mode === 'special') {
+      moves.specialSummon(handIdx, pos);
+      say(`以${pos === 'defense' ? '守备' : '攻击'}表示特殊召唤 ${name}。`);
+      return;
+    }
     moves.summon(handIdx, slot, pos);
     say(`以${pos === 'defense' ? '守备' : '攻击'}表示召唤 ${name} 到 ${slot + 1} 号位。`);
   };
@@ -324,18 +484,21 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
       deny(opts.reason);
       return;
     }
-    if (opts.canDirect) {
-      const name = CARDS[me.field[slot].card].cn;
-      const atk = CARDS[me.field[slot].card].atk;
+    const name = CARDS[me.field[slot].card].cn;
+    // 对方空场：点自己的怪兽就是直接攻击。
+    // 对方有怪且这只带直击：先选中，让玩家选择打怪或打玩家。
+    if (opts.canDirect && opts.targets.length === 0) {
       moves.attack(slot, null);
-      say(`${name} 直接攻击，伤害 ${atk}。`);
+      say(`${name} 直接攻击，伤害 ${CARDS[me.field[slot].card].atk}。`);
       return;
     }
     setSelectedAtk((prev) => (prev === slot ? null : slot));
     say(
       selectedAtk === slot
         ? '已取消选择。'
-        : `已选中 ${CARDS[me.field[slot].card].cn}，点对手的怪兽作为攻击目标。`
+        : opts.directByEffect
+          ? `已选中 ${name}。点对手怪兽攻击，或点「直接攻击」打玩家。`
+          : `已选中 ${CARDS[me.field[slot].card].cn}，点对手的怪兽作为攻击目标。`
     );
   };
 
@@ -364,7 +527,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
     say('进入战斗阶段：点自己的怪兽发起攻击。');
   };
 
-  // 主要阶段点自己的怪兽 = 改变表示形式（消耗通常召唤）
+  // 主要阶段点自己的怪兽 = 改变表示形式（不占通常召唤，每只怪兽每回合 1 次）
   const onMySlotMainClick = (slot) => {
     ensureUnlocked();
     if (!isActive || ctx.gameover) return;
@@ -372,7 +535,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
       deny('这个槽位没有怪兽。');
       return;
     }
-    const blocked = changePositionBlocked(me, slot);
+    const blocked = changePositionBlocked(me, slot, ctx.turn);
     if (blocked) {
       deny(blocked);
       return;
@@ -410,7 +573,14 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
     );
   }
 
-  const canDirect = myTurn && G.step === 'battle' && !me.firstTurn && foe.field.every((e) => !e);
+  const effectDirectReady = me.field.some(
+    (e) => e && !e.attacked && e.pos !== 'defense' && canDirectAttack(e.card)
+  );
+  const canDirect =
+    myTurn &&
+    G.step === 'battle' &&
+    !me.firstTurn &&
+    (foe.field.every((e) => !e) || effectDirectReady);
 
   return (
     <div className={`board ${shake ? 'is-shake' : ''}`} onPointerDown={ensureUnlocked}>
@@ -441,6 +611,8 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
             side="foe"
             highlight={selectedAtk !== null}
             onClick={selectedAtk !== null ? () => onFoeSlotClick(i) : undefined}
+            onInspect={showInspect}
+            onInspectMove={trackInspect}
           />
         ))}
       </div>
@@ -451,19 +623,43 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
         <span className={`phase ${myTurn ? 'is-mine' : ''}`}>
           {myTurn ? '你的回合' : '对手回合'} ·{' '}
           {G.step === 'main' ? '主要阶段' : '战斗阶段'}
-          {myTurn && me.firstTurn ? ' · 首回合不能直接攻击' : ''}
+          {myTurn && me.firstTurn ? ' · 首回合不能攻击' : ''}
         </span>
         <span className="status-msg">{msg}</span>
+        {/* 直击提示：只有带直击效果的怪兽能越过对方怪兽打玩家。
+            卡池里直击怪稀少（40 张牌组平均约 2 张），不提示玩家根本不知道要点谁。 */}
+        {myTurn &&
+          G.step === 'battle' &&
+          !me.firstTurn &&
+          foe.field.some(Boolean) &&
+          me.field.some((e) => e && canDirectAttack(e.card)) && (
+            <span className="status-hint">有怪兽带「直击」效果：点它 → 点「直接攻击」打玩家</span>
+          )}
+        {/* 改表示形式提示：主要阶段点自己的怪兽可在攻击⇄守备间切换。
+            该入口藏在"点场上怪兽"里，不提示玩家根本发现不了（jsdom 实测）。
+            现在不占通常召唤，所以只在真还有怪兽没改过时才提示。 */}
+        {myTurn &&
+          isActive &&
+          G.step === 'main' &&
+          me.field.some((e) => e && e.posTurn !== ctx.turn) && (
+            <span className="status-hint">点自己的怪兽可改变攻击⇄守备表示（每只怪兽每回合 1 次）</span>
+          )}
       </div>
 
       {pendingSummon && (
         <div className="summon-choice" role="dialog" aria-label="选择表示形式">
           <div className="summon-choice-copy">
-            <strong>选择 {pendingSummon.name} 的表示形式</strong>
+            <strong>
+              {pendingSummon.mode === 'special' ? `特殊召唤 ${pendingSummon.name}` : `选择 ${pendingSummon.name} 的表示形式`}
+            </strong>
             <span>
-              {pendingSummon.tributes > 0
-                ? `将自动献祭 ${pendingSummon.tributes} 只场上怪兽。`
-                : '无需祭品，可以直接召唤。'}
+              {pendingSummon.mode === 'special'
+                ? pendingSummon.tributes > 0
+                  ? '没有空位：将自动送 1 只最低攻怪兽入墓腾位。'
+                  : '有空位，无需祭品。'
+                : pendingSummon.tributes > 0
+                  ? `将自动献祭 ${pendingSummon.tributes} 只场上怪兽。`
+                  : '无需祭品，可以直接召唤。'}
             </span>
           </div>
           <div className="summon-choice-actions">
@@ -489,7 +685,15 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
             entry={entry}
             side="me"
             highlight={selectedAtk === i}
-            onClick={isActive && G.step === 'battle' ? () => onMySlotClick(i) : undefined}
+            onClick={
+              isActive && G.step === 'battle'
+                ? () => onMySlotClick(i)
+                : isActive && G.step === 'main'
+                  ? () => onMySlotMainClick(i)
+                  : undefined
+            }
+            onInspect={showInspect}
+            onInspectMove={trackInspect}
           />
         ))}
       </div>
@@ -520,8 +724,27 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
             type="button"
             className="btn btn-direct"
             onClick={() => {
-              const ready = me.field.findIndex((e) => e && !e.attacked);
-              if (ready >= 0) onMySlotClick(ready);
+              const foeEmpty = foe.field.every((e) => !e);
+              const selectedOk =
+                selectedAtk !== null &&
+                me.field[selectedAtk] &&
+                !me.field[selectedAtk].attacked &&
+                (foeEmpty || canDirectAttack(me.field[selectedAtk].card));
+              const ready = selectedOk
+                ? selectedAtk
+                : me.field.findIndex(
+                    (e) =>
+                      e &&
+                      !e.attacked &&
+                      e.pos !== 'defense' &&
+                      (foeEmpty || canDirectAttack(e.card))
+                  );
+              if (ready < 0) return;
+              const name = CARDS[me.field[ready].card].cn;
+              const atk = CARDS[me.field[ready].card].atk;
+              setSelectedAtk(null);
+              moves.attack(ready, null);
+              say(`${name} 直接攻击，伤害 ${atk}。`);
             }}
           >
             直接攻击
@@ -542,13 +765,63 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
           <button
             key={`${cardId}-${i}`}
             type="button"
-            className="hand-card"
+            className={['hand-card', !isActive || G.step !== 'main' ? 'is-locked' : ''].join(' ').trim()}
             onClick={() => onHandClick(i)}
-            disabled={!isActive || G.step !== 'main'}
+            aria-disabled={!isActive || G.step !== 'main'}
+            onMouseEnter={(e) => showInspect(cardId, e)}
+            onMouseMove={(e) => trackInspect(cardId, e)}
+            onMouseLeave={hideInspect}
+            onFocus={(e) => showInspect(cardId, e)}
+            onBlur={hideInspect}
           >
             <CardFace cardId={cardId} size="md" />
           </button>
         ))}
+      </div>
+
+      {pendingGrave && (
+        <div className="summon-choice" role="dialog" aria-label="选择复活表示形式">
+          <div className="summon-choice-copy">
+            <strong>从墓地复活 {pendingGrave.name}</strong>
+            <span>代价：手牌最左侧 1 张送墓（本回合特殊召唤配额 −1）。</span>
+          </div>
+          <div className="summon-choice-actions">
+            <button type="button" className="stance-btn attack" onClick={() => confirmGraveSummon('attack')}>
+              ⚔ 攻击表示
+              <small>正面朝上 · 可以攻击</small>
+            </button>
+            <button type="button" className="stance-btn defense" onClick={() => confirmGraveSummon('defense')}>
+              🛡 守备表示
+              <small>横置 · 不能攻击</small>
+            </button>
+            <button type="button" className="stance-cancel" onClick={() => setPendingGrave(null)}>
+              取消
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="graveyard-strip" aria-label="墓地（可复活）">
+        <span className="graveyard-label">墓地·可复活</span>
+        {me.graveyard
+          .map((id, i) => ({ id, i, card: CARDS[id] }))
+          .filter((x) => x.card?.canSpecialSummon)
+          .map((x) => (
+            <button
+              key={x.i}
+              type="button"
+              className="grave-card"
+              onClick={() => onGraveClick(x.i)}
+              aria-disabled={!isActive || G.step !== 'main'}
+              onMouseEnter={(e) => showInspect(x.id, e)}
+              onMouseMove={(e) => trackInspect(x.id, e)}
+              onMouseLeave={hideInspect}
+              onFocus={(e) => showInspect(x.id, e)}
+              onBlur={hideInspect}
+            >
+              <CardFace cardId={x.id} size="zone" />
+            </button>
+          ))}
       </div>
 
       <div className="logpanel">
@@ -567,6 +840,8 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
           ))}
         </ol>
       </div>
+
+      {inspect && <CardInspect cardId={inspect.id} x={inspect.x} y={inspect.y} />}
 
       {popup && (
         <div className="stage">

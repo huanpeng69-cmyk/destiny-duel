@@ -7,7 +7,8 @@
 //
 // 纯函数，不改状态，因此纯 Node 测试可直接导入。
 
-import { CARDS, tributesNeeded } from './cards.js';
+import { CARDS, tributesNeeded, MAX_NORMAL_SUMMONS } from './cards.js';
+import { resolveBattle, canDirectAttack } from './effects.js';
 
 const occupiedSlots = (p) =>
   p.field.map((e, i) => (e ? i : -1)).filter((i) => i >= 0);
@@ -20,8 +21,8 @@ export function planSummon(p, cardId) {
   if (card.type !== 'monster') {
     return { ok: false, reason: `${card.cn} 是魔法卡，不能召唤上场` };
   }
-  if (p.normalSummonUsed) {
-    return { ok: false, reason: '本回合的通常召唤次数已经用过了' };
+  if ((p.normalSummons ?? 0) >= MAX_NORMAL_SUMMONS) {
+    return { ok: false, reason: '本回合的通常召唤次数（1 只）已经用完了' };
   }
 
   const need = tributesNeeded(card.level);
@@ -38,6 +39,10 @@ export function planSummon(p, cardId) {
 
   const tributes = need > 0 ? pickTributeSlots(p, need) : [];
   const empty = p.field.indexOf(null);
+  if (empty === -1 && tributes.length === 0) {
+    // 场上全满且这张卡不需要/凑不出祭品腾位：真的没有空位
+    return { ok: false, reason: '场上没有空位了' };
+  }
   // 没有空位时，放进被送走的祭品腾出的槽位
   const slot = empty !== -1 ? empty : tributes[tributes.length - 1];
   return { ok: true, slot, tributes };
@@ -80,7 +85,8 @@ export function spellBlocked(p, opp, cardId) {
 }
 
 // 选中这只怪兽后，可以攻击哪些目标？
-// 返回 {ok, targets, canDirect} 或 {ok:false, reason}。
+// 返回 {ok, targets, canDirect, directByEffect} 或 {ok:false, reason}。
+// directByEffect：带「直击」效果的怪兽，即使对方场上有怪兽也能直接攻击玩家。
 export function attackOptions(p, opp, attackerSlot) {
   const entry = p.field[attackerSlot];
   if (!entry) return { ok: false, reason: '这个槽位没有怪兽' };
@@ -91,18 +97,46 @@ export function attackOptions(p, opp, attackerSlot) {
     return { ok: false, reason: '这只怪兽本回合已经攻击过了' };
   }
   const targets = occupiedSlots(opp);
-  if (targets.length === 0 && p.firstTurn) {
-    return { ok: false, reason: '这是你的第一个回合，不能直接攻击；出牌后请结束回合' };
+  if (p.firstTurn) {
+    return { ok: false, reason: '这是你的第一个回合，不能发起攻击；出牌后请结束回合' };
   }
-  return { ok: true, targets, canDirect: targets.length === 0 };
+  const direct = canDirectAttack(entry.card);
+  return {
+    ok: true,
+    targets,
+    // 对方空场时人人可直击；对方有怪时只有带直击效果的怪兽可以
+    canDirect: targets.length === 0 || direct,
+    directByEffect: direct,
+  };
+}
+
+// 战前预测：告诉 UI/AI「这次打下去会发生什么」。
+// 与 game.js 的 attack 共用 effects.resolveBattle，杜绝「UI 说能打、move 却拒绝」
+// 或「预告伤害和实际不一致」。返回 null 表示目标非法。
+export function attackPreview(p, opp, attackerSlot, targetSlot) {
+  const entry = p.field[attackerSlot];
+  if (!entry) return null;
+  const target = opp.field[targetSlot];
+  if (!target) return null;
+  const result = resolveBattle({
+    attackerCardId: entry.card,
+    defenderCardId: target.card,
+    defenderPos: target.pos,
+  });
+  if (!result) return null;
+  return {
+    ...result,
+    attackerName: CARDS[entry.card].cn,
+    defenderName: CARDS[target.card].cn,
+  };
 }
 
 // 能否把场上这只怪兽改变表示形式？返回 null 表示可以，否则返回理由。
-export function changePositionBlocked(p, slotIdx) {
-  if (p.normalSummonUsed) {
-    return '改变表示形式要消耗通常召唤，本回合已经用过了';
-  }
-  if (!p.field[slotIdx]) return '这个槽位没有怪兽';
+// turn = ctx.turn：每只怪兽每回合只能改 1 次（由 entry.posTurn 记录改过的回合号）。
+export function changePositionBlocked(p, slotIdx, turn) {
+  const entry = p.field[slotIdx];
+  if (!entry) return '这个槽位没有怪兽';
+  if (entry.posTurn === turn) return '这只怪兽本回合已经改变过表示形式了';
   return null;
 }
 
@@ -138,4 +172,50 @@ export function spellUseless(p, opp, cardId, handSize) {
     default:
       return true;
   }
+}
+
+// 能否把这张手牌怪特殊召唤（v1 简化规则：每回合 1 次，场满时送最低攻
+// 入墓腾位，有空位免费；不占通常召唤名额）？
+// 返回 {ok, slot, tributeSlots} 或 {ok:false, reason}。
+export function specialSummonPlan(p, cardId) {
+  const card = CARDS[cardId];
+  if (!card) return { ok: false, reason: '未知卡牌' };
+  if (card.type !== 'monster') {
+    return { ok: false, reason: `${card.cn} 是魔法卡，不能召唤上场` };
+  }
+  if (!card.canSpecialSummon) {
+    return { ok: false, reason: `${card.cn} 没有可特殊召唤的效果` };
+  }
+  if (p.specialSummonUsed) {
+    return { ok: false, reason: '本回合的特殊召唤已经用过了' };
+  }
+  const empty = p.field.indexOf(null);
+  // 场满时靠送最低攻入墓腾位（复用祭品选择逻辑），场上有怪但没空位也要付代价
+  const tributeSlots = empty === -1 ? pickTributeSlots(p, 1) : [];
+  if (empty === -1 && tributeSlots.length === 0) {
+    return { ok: false, reason: '场上没有空位了' };
+  }
+  const slot = empty !== -1 ? empty : tributeSlots[tributeSlots.length - 1];
+  return { ok: true, slot, tributeSlots };
+}
+
+// 能否把墓地这张怪复活到场上（v1：代价 1 张手牌送墓，需空位，
+// 与手牌特召共用每回合 1 次配额）？
+export function graveSummonPlan(p, cardId) {
+  const card = CARDS[cardId];
+  if (!card) return { ok: false, reason: '未知卡牌' };
+  if (card.type !== 'monster') return { ok: false, reason: '墓地这张不是怪兽' };
+  if (!card.canSpecialSummon) {
+    return { ok: false, reason: `${card.cn} 没有可特殊召唤的效果，不能复活` };
+  }
+  if (p.specialSummonUsed) {
+    return { ok: false, reason: '本回合的特殊召唤已经用过了' };
+  }
+  if (p.hand.length === 0) {
+    return { ok: false, reason: '复活需要 1 张手牌作代价，你手上没有牌' };
+  }
+  if (!p.field.includes(null)) {
+    return { ok: false, reason: '场上没有空位，无法复活' };
+  }
+  return { ok: true, slot: p.field.indexOf(null) };
 }

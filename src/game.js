@@ -13,14 +13,23 @@
 import { INVALID_MOVE } from 'boardgame.io/dist/esm/core.js';
 import {
   CARDS,
-  DECK_LIST,
+  buildRandomDeck,
   FIELD_SLOTS,
   START_LP,
   START_HAND,
   LOG_LIMIT,
   SPELL_TRAP_SLOTS,
+  MAX_NORMAL_SUMMONS,
   tributesNeeded,
 } from './cards.js';
+// 怪兽效果（5 类，纯函数）：效果只在固定锚点被调用，不重写战斗公式。
+import {
+  MAX_CHAIN_DEPTH,
+  canDirectAttack,
+  onSummonTriggers,
+  onDestroyTriggers,
+  resolveBattle,
+} from './effects.js';
 
 const opponentOf = (id) => (id === '0' ? '1' : '0');
 
@@ -34,10 +43,11 @@ function makePlayer() {
     field: Array(FIELD_SLOTS).fill(null),
     spellTrapZone: Array(SPELL_TRAP_SLOTS).fill(null),
     graveyard: [],
-    normalSummonUsed: false,
+    normalSummons: 0,
     lockedUntil: 0, // 光的护封剑：此回合号之前不能进入战斗阶段
     deckOut: false,  // 抽牌时卡组为空 => 判负
-    firstTurn: true, // 每位玩家各自的首次回合：不能直接攻击
+    firstTurn: true, // 每位玩家各自的首个回合：不能发起任何攻击
+    specialSummonUsed: false, // 每回合 1 次特殊召唤（手牌/墓地共用配额）
   };
 }
 
@@ -72,12 +82,59 @@ function damage(G, playerID, amount) {
   p.lp = Math.max(0, p.lp - amount);
 }
 
-function destroySlot(G, playerID, slotIdx) {
+// 送墓（不触发任何「被破坏」效果）。
+// 祭品、代价这类「主动送墓」必须走这里 —— 它们不是"被破坏"，
+// 误用 destroyMonster 会让 destroyBurn 之类效果在不该触发时触发。
+function sendToGrave(G, playerID, slotIdx) {
   const p = G.players[playerID];
   if (p.field[slotIdx]) {
     p.graveyard.push(p.field[slotIdx].card);
     p.field[slotIdx] = null;
   }
+}
+
+// 破坏场上的怪兽：送墓 + 触发「被破坏时」效果（destroyBurn 等）。
+// 返回被破坏的卡 id（无怪兽时返回 null），供日志与演出使用。
+function destroyMonster(G, playerID, slotIdx, ctx) {
+  const p = G.players[playerID];
+  const entry = p.field[slotIdx];
+  if (!entry) return null;
+  const cardId = entry.card;
+  p.graveyard.push(cardId);
+  p.field[slotIdx] = null;
+  // 被破坏 → 触发效果（链深由调用方通过 ctx.__chain 传递，超限即停）
+  triggerOnDestroy(G, playerID, cardId, ctx);
+  return cardId;
+}
+
+// 触发「被破坏送墓」类效果：destroyBurn 给对方（被破坏者的对手）伤害。
+// 效果可能连锁（burn 不造成破坏，故 v1 实际只有一层），仍走链深保护。
+function triggerOnDestroy(G, ownerId, cardId, ctx) {
+  const depth = (ctx && ctx.__chain) || 0;
+  if (depth >= MAX_CHAIN_DEPTH) {
+    say(G, null, '效果连锁过深，已停止结算。');
+    return;
+  }
+  const { burn } = onDestroyTriggers(cardId);
+  if (!burn) return;
+  const victimId = opponentOf(ownerId);
+  damage(G, victimId, burn);
+  say(G, ownerId, `${CARDS[cardId].cn} 被破坏，效果给与对手 ${burn} 点伤害。`, {
+    kind: 'effect', card: cardId, effect: 'destroyBurn', dmg: burn, dir: ownerId,
+  });
+}
+
+// 触发「召唤成功」类效果：summonDraw 抽牌。
+// summonedFrom: 'hand' | 'grave' | 'spell'（死者苏生等）
+function triggerOnSummon(G, playerID, cardId, summonedFrom) {
+  const { draws } = onSummonTriggers(cardId, summonedFrom);
+  if (!draws) return;
+  drawCards(G, playerID, draws);
+  const p = G.players[playerID];
+  say(G, playerID, `${CARDS[cardId].cn} 召唤成功，效果抽 ${draws} 张牌。`, {
+    kind: 'effect', card: cardId, effect: 'summonDraw', draw: draws,
+  });
+  if (p.deckOut) say(G, playerID, '卡组已空，无法抽牌。');
 }
 
 // 祭品自动选择：优先送走场上攻击力最低的怪兽，让新手不用做这个决策。
@@ -113,7 +170,6 @@ function highestAtkSlot(p) {
 
 export const DestinyDuel = {
   name: 'destiny-duel',
-
   setup: ({ random }) => {
     const G = {
       players: { 0: makePlayer(), 1: makePlayer() },
@@ -124,20 +180,28 @@ export const DestinyDuel = {
       fxSeq: 0,
     };
     for (const id of ['0', '1']) {
-      G.players[id].deck = random.Shuffle([...DECK_LIST]);
+      G.players[id].deck = buildRandomDeck(random);
       drawCards(G, id, START_HAND);
     }
-    say(G, null, '决斗开始，双方各 4000 生命值，起手 5 张。');
+    say(G, null, '决斗开始：双方 4000 生命、起手 5 张，本局卡组从卡池随机抽得。');
     return G;
   },
 
   // 每回合开始（只在服务端运行）：抽 1 张、重置回合内标记。
   turn: {
+    // 随机先后手：开局时用种子化 RNG 洗牌决定先发位置（0 或 1）。
+    // 客户端/服务端/回放结果完全一致；每局新 matchID = 新种子 = 新的一手。
+    order: {
+      first: ({ random }) => random.Shuffle([0, 1])[0],
+      // next 与框架 DEFAULT 一致：随机只决定先发，之后仍按 0→1→0 轮流
+      next: ({ ctx }) => (ctx.playOrderPos + 1) % ctx.playOrder.length,
+    },
     onBegin: ({ G, ctx }) => {
       const p = G.players[ctx.currentPlayer];
       G.turnNumber = ctx.turn;
       G.step = 'main';
-      p.normalSummonUsed = false;
+      p.normalSummons = 0;
+      p.specialSummonUsed = false;
       for (const entry of p.field) {
         if (entry) entry.attacked = false;
       }
@@ -173,7 +237,7 @@ export const DestinyDuel = {
       if (G.step !== 'main') return INVALID_MOVE;
       if (playerID !== ctx.currentPlayer) return INVALID_MOVE;
       const p = G.players[playerID];
-      if (p.normalSummonUsed) return INVALID_MOVE;
+      if (p.normalSummons >= MAX_NORMAL_SUMMONS) return INVALID_MOVE;
       if (!Number.isInteger(handIdx) || handIdx < 0 || handIdx >= p.hand.length) {
         return INVALID_MOVE;
       }
@@ -195,11 +259,11 @@ export const DestinyDuel = {
       if (!destOk) return INVALID_MOVE;
 
       const tributed = tributeSlots.map((i) => CARDS[p.field[i].card].cn);
-      for (const slot of tributeSlots) destroySlot(G, playerID, slot);
+      for (const slot of tributeSlots) sendToGrave(G, playerID, slot);
 
       p.hand.splice(handIdx, 1);
       p.field[slotIdx] = { card: cardId, attacked: false, pos };
-      p.normalSummonUsed = true;
+      p.normalSummons += 1;
 
       const mode = pos === 'defense' ? '守备表示' : '攻击表示';
       const lead = tributed.length > 0
@@ -208,10 +272,16 @@ export const DestinyDuel = {
       say(G, playerID, lead, {
         kind: 'summon', card: cardId, tributes: tributed.length, pos,
       });
+      // 召唤成功 → 触发召唤类效果（summonDraw 等）
+      triggerOnSummon(G, playerID, cardId, 'hand');
     },
 
-    // 改变表示形式。消耗本次通常召唤（原作规则）。
-    // 简化版只允许改变场上已有怪兽的表示形式，且必须在主要阶段。
+    // 改变表示形式。规则（用户 2026-03 选定，贴近原作）：
+    //   · 不消耗通常召唤；
+    //   · 每只怪兽每回合只能改 1 次。
+    // 实现上用 entry.posTurn 记住「这只怪兽在哪一回合改过」，而不是加布尔标志：
+    // 标志位要在 summon / specialSummon / graveSummon / 死者苏生 每条建场路径
+    // 都初始化，漏一处就变成「永远能改」；记回合号则不需要建场路径配合。
     changePosition: ({ G, ctx, playerID }, slotIdx) => {
       if (G.step !== 'main') return INVALID_MOVE;
       if (playerID !== ctx.currentPlayer) return INVALID_MOVE;
@@ -219,12 +289,12 @@ export const DestinyDuel = {
       if (!Number.isInteger(slotIdx) || slotIdx < 0 || slotIdx >= FIELD_SLOTS) {
         return INVALID_MOVE;
       }
-      if (p.normalSummonUsed) return INVALID_MOVE;
       const entry = p.field[slotIdx];
       if (!entry) return INVALID_MOVE;
+      if (entry.posTurn === ctx.turn) return INVALID_MOVE; // 本回合已经改过
       const next = entry.pos === 'defense' ? 'attack' : 'defense';
       entry.pos = next;
-      p.normalSummonUsed = true;
+      entry.posTurn = ctx.turn;
       const cn = CARDS[entry.card].cn;
       const mode = next === 'defense' ? '守备表示' : '攻击表示';
       say(G, playerID, `改变表示形式：${cn} 变为${mode}。`, {
@@ -232,6 +302,82 @@ export const DestinyDuel = {
       });
     },
 
+    // 特殊召唤 v1（简化规则，不按单卡模拟精确文本）：
+    // 每回合 1 次（specialSummonUsed 标志），两个来源共用配额：
+    //   1) specialSummon：把 canSpecialSummon 标记的手牌怪召唤到场上。
+    //      代价：场上无空位时送 1 只己方最低攻怪兽入墓（复用祭品逻辑），
+    //      有空位则免费。不消耗通常召唤名额。
+    //   2) graveSummon：把自己墓地里的 canSpecialSummon 怪复活到空槽，
+    //      代价：手牌最左侧 1 张送墓（需有手牌）。
+    specialSummon: ({ G, ctx, playerID }, handIdx, pos = 'attack') => {
+      if (G.step !== 'main') return INVALID_MOVE;
+      if (playerID !== ctx.currentPlayer) return INVALID_MOVE;
+      const p = G.players[playerID];
+      if (p.specialSummonUsed) return INVALID_MOVE;
+      if (!Number.isInteger(handIdx) || handIdx < 0 || handIdx >= p.hand.length) {
+        return INVALID_MOVE;
+      }
+      if (!['attack', 'defense'].includes(pos)) return INVALID_MOVE;
+      const cardId = p.hand[handIdx];
+      const card = CARDS[cardId];
+      if (!card || card.type !== 'monster' || !card.canSpecialSummon) {
+        return INVALID_MOVE; // 无特召标记的卡（经典卡/普通文本）不能走这条路
+      }
+
+      const empty = p.field.indexOf(null);
+      // 场满时靠"送最低攻入墓"腾出槽位；场上无怪（不可能场满）时无代价
+      const tributeSlot = empty === -1 ? pickTributes(p, 1)[0] : null;
+      if (empty === -1 && tributeSlot === undefined) return INVALID_MOVE;
+      const destSlot = empty !== -1 ? empty : tributeSlot;
+      const tributeName = tributeSlot !== null
+        ? CARDS[p.field[tributeSlot].card].cn
+        : '';
+
+      p.hand.splice(handIdx, 1);
+      if (tributeSlot !== null) sendToGrave(G, playerID, tributeSlot);
+      p.field[destSlot] = { card: cardId, attacked: false, pos };
+      p.specialSummonUsed = true;
+
+      const mode = pos === 'defense' ? '守备表示' : '攻击表示';
+      say(G, playerID, tributeName
+        ? `特殊召唤：送 ${tributeName} 入墓，从手牌特殊召唤 ${card.cn}（${mode}）。`
+        : `特殊召唤：从手牌特殊召唤 ${card.cn}（${mode}）。`,
+        { kind: 'summon', card: cardId, pos, special: true, cost: tributeName || null });
+      // 特殊召唤成功 → 触发召唤类效果（来源是手牌）
+      triggerOnSummon(G, playerID, cardId, 'hand');
+    },
+
+    graveSummon: ({ G, ctx, playerID }, graveIdx, pos = 'attack') => {
+      if (G.step !== 'main') return INVALID_MOVE;
+      if (playerID !== ctx.currentPlayer) return INVALID_MOVE;
+      const p = G.players[playerID];
+      if (p.specialSummonUsed) return INVALID_MOVE; // 与手牌特召共用每回合 1 次
+      if (!Number.isInteger(graveIdx) || graveIdx < 0 || graveIdx >= p.graveyard.length) {
+        return INVALID_MOVE;
+      }
+      if (!['attack', 'defense'].includes(pos)) return INVALID_MOVE;
+      const cardId = p.graveyard[graveIdx];
+      const card = CARDS[cardId];
+      if (!card || card.type !== 'monster' || !card.canSpecialSummon) {
+        return INVALID_MOVE;
+      }
+      if (p.hand.length === 0) return INVALID_MOVE; // 代价：1 张手牌
+      const empty = p.field.indexOf(null);
+      if (empty === -1) return INVALID_MOVE;
+
+      p.graveyard.splice(graveIdx, 1);
+      const costCard = p.hand.shift();
+      p.graveyard.push(costCard);
+      p.field[empty] = { card: cardId, attacked: false, pos };
+      p.specialSummonUsed = true;
+
+      const mode = pos === 'defense' ? '守备表示' : '攻击表示';
+      say(G, playerID,
+        `特殊召唤：手牌的 ${CARDS[costCard].cn} 送入墓地，从墓地复活 ${card.cn}（${mode}）。`,
+        { kind: 'summon', card: cardId, pos, special: true, cost: CARDS[costCard].cn });
+      // 从墓地复活 → 触发「从墓地的特殊召唤成功时」类效果（summonDraw）
+      triggerOnSummon(G, playerID, cardId, 'grave');
+    },
     // 发动魔法。client:false —— 抽牌会摸到隐藏卡组，禁止客户端乐观执行。
     castSpell: {
       move: ({ G, ctx, playerID }, handIdx) => {
@@ -272,7 +418,7 @@ export const DestinyDuel = {
             if (slot === -1) return INVALID_MOVE; // 对方场上没有怪兽
             const victim = CARDS[opp.field[slot].card].cn;
             const victimId = opp.field[slot].card;
-            destroySlot(G, oppId, slot);
+            destroyMonster(G, oppId, slot);
             say(G, playerID, `发动银河旋风，破坏 ${victim}。`, {
               kind: 'spell', card: cardId, effect: 'destroy', victim: victimId,
             });
@@ -291,6 +437,8 @@ export const DestinyDuel = {
             say(G, playerID, `发动死者苏生，特殊召唤 ${CARDS[revived].cn}。`, {
               kind: 'spell', card: cardId, effect: 'reborn', victim: revived,
             });
+            // 死者苏生也是「从墓地的特殊召唤」→ 同样触发 summonDraw
+            triggerOnSummon(G, playerID, revived, 'grave');
             break;
           }
 
@@ -341,23 +489,31 @@ export const DestinyDuel = {
       if (!Number.isInteger(attackerSlot) || attackerSlot < 0 || attackerSlot >= FIELD_SLOTS) {
         return INVALID_MOVE;
       }
+      if (p.firstTurn) return INVALID_MOVE; // 首回合不能发起任何攻击（原作首回合限制加强版）
       const attacker = p.field[attackerSlot];
       if (!attacker || attacker.attacked) return INVALID_MOVE;
       // 守备表示的怪兽不能发起攻击
       if (attacker.pos === 'defense') return INVALID_MOVE;
       const a = CARDS[attacker.card];
       const oppHasMonster = opp.field.some(Boolean);
+      // 直击效果：带 directAttack 的怪兽无视对方怪兽，可直接打玩家
+      const directByEffect = canDirectAttack(attacker.card);
 
       // 直接攻击
       if (targetSlot === null || targetSlot === undefined) {
-        if (oppHasMonster) return INVALID_MOVE; // 对方有怪兽时不能直接攻击
-        if (p.firstTurn) return INVALID_MOVE; // 各玩家首次回合不能直接攻击
+        // 对方有怪兽时，只有带「直击」效果的怪兽才能直接攻击玩家
+        if (oppHasMonster && !directByEffect) return INVALID_MOVE;
         attacker.attacked = true;
-        damage(G, oppId, a.atk);
-        say(G, playerID, `${a.cn} 直接攻击，造成 ${a.atk} 伤害。`, {
-          kind: 'attack', attacker: attacker.card, target: null,
-          outcome: 'direct', dmg: a.atk, dir: playerID,
-        });
+        const dmg = a.atk;
+        damage(G, oppId, dmg);
+        say(G, playerID,
+          directByEffect && oppHasMonster
+            ? `${a.cn}（直击效果）越过对方怪兽直接攻击，造成 ${dmg} 伤害。`
+            : `${a.cn} 直接攻击，造成 ${dmg} 伤害。`,
+          {
+            kind: 'attack', attacker: attacker.card, target: null,
+            outcome: 'direct', dmg, dir: playerID, direct: directByEffect || undefined,
+          });
         return;
       }
 
@@ -368,38 +524,74 @@ export const DestinyDuel = {
       if (!defender) return INVALID_MOVE;
       const d = CARDS[defender.card];
       const dMode = defender.pos === 'defense' ? '（守备表示）' : '';
-      // 攻击表示用攻击力对攻击力，守备表示用攻击力对防守力。
-      // 这是新手版最容易混淆的战斗计算，必须先确定守方本次使用的数值。
-      const defenderPower = defender.pos === 'defense' ? d.def : d.atk;
 
       attacker.attacked = true;
 
-      if (a.atk > defenderPower) {
-        // 打破守方，伤害 = 我方攻击力 - 守方本次使用的数值。
-        const dmg = Math.max(0, a.atk - defenderPower);
-        destroySlot(G, oppId, targetSlot);
-        damage(G, oppId, dmg);
-        say(G, playerID, `${a.cn} 攻击 ${d.cn}${dMode}，破坏并造成 ${dmg} 伤害。`, {
-          kind: 'attack', attacker: attacker.card, target: defender.card,
-          outcome: 'win', dmg, dir: playerID,
-        });
-      } else if (a.atk < defenderPower) {
-        // 攻击方被反杀，伤害 = 守方本次使用的数值 - 我方攻击力。
-        const dmg = Math.max(0, defenderPower - a.atk);
-        destroySlot(G, playerID, attackerSlot);
-        damage(G, playerID, dmg);
-        say(G, playerID, `${a.cn} 攻击 ${d.cn}${dMode} 失败被反杀，受到 ${dmg} 伤害。`, {
-          kind: 'attack', attacker: attacker.card, target: defender.card,
-          outcome: 'lose', dmg, dir: playerID,
-        });
+      // 战斗结算交给 effects.resolveBattle（纯函数）：
+      // 它统一处理 battleBoost 加攻、pierce 穿透、battleProtect 免破坏，
+      // 并保持原有「守备被破不扣血」规则（pierce 是唯一例外）。
+      // 注意：p.ctx 传给破坏流程用于链深统计。
+      const result = resolveBattle({
+        attackerCardId: attacker.card,
+        defenderCardId: defender.card,
+        defenderPos: defender.pos,
+      });
+      if (!result) return INVALID_MOVE;
+
+      // 1) 破坏判定（免疫时保留）
+      if (result.breakDefender) destroyMonster(G, oppId, targetSlot);
+      if (result.breakAttacker) destroyMonster(G, playerID, attackerSlot);
+
+      // 2) 伤害结算
+      if (result.damageToDefender > 0) damage(G, oppId, result.damageToDefender);
+      if (result.damageToAttacker > 0) damage(G, playerID, result.damageToAttacker);
+
+      // 3) 演出文案：把效果参与的部分讲清楚，避免玩家觉得"数值不对"
+      const boostNote = result.atk !== a.atk ? `（战斗中攻击力 ${a.atk}→${result.atk}）` : '';
+      const pierceNote = result.pierced ? '（贯通）' : '';
+      const protectNote = result.protectedByEffect ? '（战斗破坏免疫，未被破坏）' : '';
+
+      if (result.outcome === 'win') {
+        say(G, playerID,
+          result.protectedByEffect
+            ? `${a.cn}${boostNote} 攻击 ${d.cn}${dMode}，造成 ${result.damageToDefender} 伤害，但对方${protectNote}。`
+            : `${a.cn}${boostNote} 攻击 ${d.cn}，破坏并造成 ${result.damageToDefender} 伤害。`,
+          {
+            kind: 'attack', attacker: attacker.card, target: defender.card,
+            outcome: 'win', dmg: result.damageToDefender, dir: playerID,
+            protected: result.protectedByEffect || undefined,
+            boost: result.atk !== a.atk ? result.atk : undefined,
+            pierced: result.pierced || undefined,
+          });
+      } else if (result.outcome === 'wall') {
+        say(G, playerID,
+          result.pierced
+            ? `${a.cn}${boostNote} 贯通攻击 ${d.cn}${dMode}，破坏并造成 ${result.damageToDefender} 伤害${pierceNote}。`
+            : `${a.cn} 攻击 ${d.cn}（守备表示），破壁无伤害。`,
+          {
+            kind: 'attack', attacker: attacker.card, target: defender.card,
+            outcome: 'wall', dmg: result.damageToDefender, dir: playerID,
+            pierced: result.pierced || undefined,
+          });
+      } else if (result.outcome === 'lose') {
+        say(G, playerID,
+          `${a.cn}${boostNote} 攻击 ${d.cn}${dMode} 失败被反杀，受到 ${result.damageToAttacker} 伤害。`,
+          {
+            kind: 'attack', attacker: attacker.card, target: defender.card,
+            outcome: 'lose', dmg: result.damageToAttacker, dir: playerID,
+            boost: result.atk !== a.atk ? result.atk : undefined,
+          });
       } else {
-        // 攻击力相同：同归于尽，双方无伤害
-        destroySlot(G, oppId, targetSlot);
-        destroySlot(G, playerID, attackerSlot);
-        say(G, playerID, `${a.cn} 与 ${d.cn}${dMode} 同归于尽。`, {
-          kind: 'attack', attacker: attacker.card, target: defender.card,
-          outcome: 'draw', dmg: 0, dir: playerID,
-        });
+        say(G, playerID,
+          result.protectedByEffect
+            ? `${a.cn}${boostNote} 与 ${d.cn}${dMode} 同归于尽；对方${protectNote}。`
+            : `${a.cn}${boostNote} 与 ${d.cn}${dMode} 同归于尽。`,
+          {
+            kind: 'attack', attacker: attacker.card, target: defender.card,
+            outcome: 'draw', dmg: 0, dir: playerID,
+            protected: result.protectedByEffect || undefined,
+            boost: result.atk !== a.atk ? result.atk : undefined,
+          });
       }
     },
 

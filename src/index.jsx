@@ -12,9 +12,14 @@ import { Local } from 'boardgame.io/multiplayer';
 import { DestinyDuel } from './game.js';
 import Board from './board.jsx';
 import { createBotClient } from './bot.js';
-import { CARD_CATALOG_COUNT, cardDescriptionForDisplay, cardNameForDisplay } from './cards.js';
+import { CARD_CATALOG, cardDescriptionForDisplay, cardNameForDisplay } from './cards.js';
 import { setSfx, sfxEnabled, ensureUnlocked } from './sfx.js';
 import './app.css';
+
+// 页面加载时间戳：保证每次刷新都拿到全新的 matchID。
+// 没有它，刷新页面会复用 'duel-0' 这一旧棋局，随机种子不变，
+// 玩家会看到同样的卡组和同样的先手（AGENTS.md 踩坑记录）。
+const LOAD_STAMP = Date.now().toString(36);
 
 // 客户端与 AI 共享同一个 multiplayer 实例
 const mp = Local();
@@ -73,7 +78,7 @@ function CardLibrary({ onClose }) {
         <div className="library-head">
           <div>
             <div className="library-kicker">YGOPRODECK CARD DATABASE</div>
-            <h2>卡牌图鉴 <span>{CARD_CATALOG_COUNT.toLocaleString()} 张</span></h2>
+            <h2>卡牌图鉴 <span>{CARD_CATALOG.length.toLocaleString()} 张</span></h2>
           </div>
           <button type="button" className="library-close" onClick={onClose}>关闭 ×</button>
         </div>
@@ -155,7 +160,11 @@ function Page() {
   const [musicOn, setMusicOn] = useState(true);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const musicRef = useRef(null);
-  const matchID = `duel-${matchN}`;
+  // 每局唯一 matchID：必须带页面加载时的时间戳。
+  // Local() 在同一进程内按 matchID 缓存棋局——若只用 'duel-0'，
+  // 刷新页面会命中旧棋局，seed 不变、先后手与卡组都固定，
+  // 玩家看到的永远是同一局（AGENTS.md 踩坑记录）。
+  const matchID = `duel-${matchN}-${LOAD_STAMP}`;
 
   useEffect(() => {
     const audio = musicRef.current;
@@ -202,7 +211,7 @@ function Page() {
         <div className="hero-subline"><span /> 光之决斗者 <b>VS</b> 暗之决斗者 <span /></div>
       </header>
       <p className="sub">
-        新手简化版 · 生命值 4000 · 起手 5 张 · 每回合抽 1 张 · 场上 3 个位置 ·
+        新手简化版 · 生命值 4000 · 起手 5 张 · 每回合抽 1 张 · 场上 5 个位置 ·
         每回合 1 次通常召唤（5-6 星需 1 祭品 / 7 星以上需 2 祭品） ·
         生命值归零或卡组抽干判负
       </p>
@@ -229,7 +238,7 @@ function Page() {
           {musicOn ? '背景音乐开' : '背景音乐关'}
         </button>
         <button type="button" className="toggle catalog-toggle" onClick={() => setLibraryOpen(true)}>
-          卡牌图鉴 · {CARD_CATALOG_COUNT.toLocaleString()}
+          卡牌图鉴 · {CARD_CATALOG.length.toLocaleString()}
         </button>
         <span className="toolbar-hint">对手为 AI，回合内自动行动，稍候片刻</span>
       </div>
