@@ -47,7 +47,7 @@ test('内置 14 张译名回归（不依赖 zhName 字段）', () => {
   );
 });
 
-test('starter 14 张在中文卡库中全部命中，且与 CARDS.cn 一致', () => {
+test('卡池全部卡牌在中文卡库中命中，且与 CARDS.cn 一致', () => {
   const map = zh.cards;
   let checked = 0;
   for (const card of Object.values(CARDS)) {
@@ -58,7 +58,8 @@ test('starter 14 张在中文卡库中全部命中，且与 CARDS.cn 一致', ()
     assert.equal(t.name, card.cn, `${card.cn} 的中文名应与 CARDS.cn 一致`);
     checked += 1;
   }
-  assert.equal(checked, 14, '应校验全部 14 张 starter 卡');
+  assert.equal(checked, Object.keys(CARDS).length, '应校验卡池内全部卡牌');
+  assert.ok(checked >= 14, '卡池应至少包含 14 张经典 starter 卡');
 });
 
 test('中文卡库覆盖率达到阈值', () => {

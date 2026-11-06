@@ -9,7 +9,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "node --test",
-    "cards:import": "node scripts/import-ygoprodeck.mjs"
+    "cards:import": "node scripts/import-ygoprodeck.mjs",
+    "cards:pool": "node scripts/make-duel-pool.mjs"
   },
   "dependencies": {
     "@n1xx1/ocgcore-wasm": "npm:@jsr/n1xx1__ocgcore-wasm@^0.1.4",

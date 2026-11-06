@@ -1,4 +1,4 @@
-import catalog from './data/starter.cards.json' with { type: 'json' };
+import catalog from './data/duel-pool.json' with { type: 'json' };
 
 // 卡牌资料来自 YGOPRODeck API 的本地快照。
 // 规则引擎只依赖这里的稳定字段；完整原始数据保留在 src/data/ 中，
@@ -51,10 +51,10 @@ const ZH_CARD_DESCRIPTIONS = {
   'Celtic Guardian': '学会了剑术的精灵。以快速的攻击作弄敌人。',
   'Mystical Elf': '虽然是纤弱的精灵，但以神圣力量护身有很强的守备。',
   'Pot of Greed': '①：自己抽2张。',
-  'Graceful Charity': '①：自己抽3张。那之后，选自己2张手卡丢弃。',
-  'Mystical Space Typhoon': '①：以场上1张魔法·陷阱卡为对象才能发动。那张卡破坏。',
+  'Graceful Charity': '①：自己抽3张。',
+  'Mystical Space Typhoon': '①：破坏对方场上1只攻击力最高的怪兽。',
   'Monster Reborn': '①：以自己或对方的墓地1只怪兽为对象才能发动。那只怪兽在自己场上特殊召唤。',
-  'Swords of Revealing Light': '这张卡发动后继续留在场上，用对方回合计算的3回合后的对方结束阶段破坏。\n①：作为这张卡的发动时的效果处理，对方场上有里侧表示怪兽存在的场合，那些全部变成表侧表示。\n②：只要这张卡在魔法与陷阱区域存在，对方怪兽不能攻击宣言。',
+  'Swords of Revealing Light': '①：对方下个回合不能攻击。此卡留在场上，于对方回合结束时送入墓地。',
 };
 
 export function cardNameForDisplay(card) {
@@ -73,18 +73,18 @@ export function cardDescriptionForDisplay(card) {
 
 const effectByName = {
   'Pot of Greed': { effect: 'draw2', desc: '①：自己抽2张。' },
-  'Graceful Charity': { effect: 'draw3', desc: '①：自己抽3张。那之后，选自己2张手卡丢弃。' },
+  'Graceful Charity': { effect: 'draw3', desc: '①：自己抽3张。' },
   'Mystical Space Typhoon': {
     effect: 'destroyStrongest',
-    desc: '①：以场上1张魔法·陷阱卡为对象才能发动。那张卡破坏。',
+    desc: '①：破坏对方场上1只攻击力最高的怪兽。',
   },
   'Monster Reborn': {
     effect: 'reborn',
-    desc: '①：以自己或对方的墓地1只怪兽为对象才能发动。那只怪兽在自己场上特殊召唤。',
+    desc: '①：以自己墓地1只怪兽为对象才能发动。那只怪兽在自己场上特殊召唤。',
   },
   'Swords of Revealing Light': {
     effect: 'lockdown',
-    desc: '这张卡发动后继续留在场上，用对方回合计算的3回合后的对方结束阶段破坏。①：作为这张卡的发动时的效果处理，对方场上有里侧表示怪兽存在的场合，那些全部变成表侧表示。②：只要这张卡在魔法与陷阱区域存在，对方怪兽不能攻击宣言。',
+    desc: '①：对方下个回合不能攻击。此卡留在场上，于对方回合结束时送入墓地。',
     persistence: 'until-opponent-turn-ends',
   },
 };
@@ -98,6 +98,16 @@ export const CARDS = Object.fromEntries(
         ...source,
         effect: special?.effect ?? null,
         persistence: special?.persistence ?? null,
+        // 效果文本提及 special summon 的新怪兽（make-duel-pool.mjs 打标）；
+        // 经典卡与无效果文本的卡为 false，引擎据此放行/拒绝特召。
+        canSpecialSummon: Boolean(source.canSpecialSummon),
+        // 怪兽效果（make-duel-pool.mjs 用「整段锚定」正则打标，见 effects.js）：
+        //   monsterEffect  效果类名（directAttack/pierce/battleProtect/
+        //                  summonDraw/destroyBurn/battleBoost）
+        //   effectParams   数值参数（draw/burn/boost）
+        // 打标与文本严格一致，没有该字段的卡就是「无效果」。
+        monsterEffect: source.monsterEffect ?? null,
+        effectParams: source.effectParams ?? {},
         desc: special?.desc ?? cardDescriptionForDisplay(source),
         cn: cardNameForDisplay(source),
         lore: cardDescriptionForDisplay(source),
@@ -107,7 +117,6 @@ export const CARDS = Object.fromEntries(
 );
 
 export const CARD_CATALOG = Object.values(CARDS);
-export const CARD_CATALOG_COUNT = catalog.count;
 
 // 牌组从导入卡库里选取；卡库本身是完整的，牌组仍保持新手局的长度。
 // 这样所有牌面基础信息来自 YGOPRODeck，同时不会让一局游戏变成数万张卡的长局。
@@ -145,10 +154,25 @@ if (Object.values(starterCopies).some((count) => count > 3)) {
   throw new Error('Starter deck cannot contain more than 3 copies of a card');
 }
 
-export const FIELD_SLOTS = 3;
+// 新对局卡组：setup 时按 boardgame.io 注入的 random（种子化、客户端/服务端完全一致）
+// 从对局卡池随机抽一套全新卡组，让每局对战的卡牌都「全新不重复」。
+// 上面的 DECK_LIST 仍作为「经典新手牌组」保留，供测试引用。
+export const MAX_DECK_COPIES = 3;
+export function buildRandomDeck(random, size = DECK_SIZE, maxCopies = MAX_DECK_COPIES) {
+  const bag = [];
+  for (const card of CARD_CATALOG) {
+    for (let i = 0; i < maxCopies; i++) bag.push(card.key);
+  }
+  return random.Shuffle(bag).slice(0, size);
+}
+
+export const FIELD_SLOTS = 5;
 export const START_LP = 4000;
 export const START_HAND = 5;
 export const LOG_LIMIT = 40;
+
+// 每回合通常召唤上限（含改变表示形式）。2025-06 起限定为 1 只。
+export const MAX_NORMAL_SUMMONS = 1;
 
 // 有官方卡图 URL 时显示远程缩略图；网络不可用时 CardFace 会回落到 CSS 卡面。
 export const cardArt = (id) => CARDS[id]?.imageUrlSmall ?? '';
