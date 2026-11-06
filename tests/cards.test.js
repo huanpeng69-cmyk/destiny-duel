@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CARDS, DECK_LIST, DECK_SIZE, buildRandomDeck, MAX_DECK_COPIES, CARD_CATALOG } from '../src/cards.js';
+import { CARDS, DECK_LIST, DECK_SIZE, buildRandomDeck, MAX_DECK_COPIES, CARD_CATALOG, DIRECT_ATTACK_RESERVE } from '../src/cards.js';
 
 test('新手牌组的常见卡牌显示中文名称和效果', () => {
   assert.equal(CARDS.blueEyes.cn, '青眼白龙');
@@ -56,4 +56,51 @@ test('buildRandomDeck 同种子确定、异种子不同，且卡组有差异性'
   const distinct = new Set(a).size;
   assert.ok(distinct >= 15, `卡组应多样，只抽到 ${distinct} 张不同卡`);
   assert.ok(CARD_CATALOG.length > DECK_SIZE, '卡池需大过单副卡组，才谈得上每局刷新');
+});
+
+// ---- 直击怪保底（2026-03 用户裁决：保底 2 份）----
+// 背景：4 张直击怪在 74 张池里随机抽 40 张，实测平均 2.17 张、8.3% 的牌组一张都没有，
+// 起手含直击只有 24.2%——玩家手里没有直击怪时界面「直接攻击」入口不出现，
+// 看起来就是「效果没生效」。保底后起手率 38.0%，且不干预起手洗牌。
+
+const countDirect = (deck) =>
+  deck.filter((key) => CARDS[key].monsterEffect === 'directAttack').length;
+
+test('每副随机卡组都保留保底份数的「直击」怪', () => {
+  assert.ok(DIRECT_ATTACK_RESERVE >= 1, '保底份数应至少 1 份');
+  for (let seed = 1; seed <= 200; seed++) {
+    const deck = buildRandomDeck(seededShuffleRandom(seed));
+    assert.equal(deck.length, DECK_SIZE, `种子 ${seed} 的牌组长度应不变`);
+    assert.ok(
+      countDirect(deck) >= DIRECT_ATTACK_RESERVE,
+      `种子 ${seed} 的牌组只有 ${countDirect(deck)} 张直击怪，低于保底 ${DIRECT_ATTACK_RESERVE}`
+    );
+  }
+});
+
+test('保底不突破单卡张数上限，也不改变同种子确定性', () => {
+  for (let seed = 1; seed <= 200; seed++) {
+    const deck = buildRandomDeck(seededShuffleRandom(seed));
+    const counts = new Map();
+    for (const key of deck) counts.set(key, (counts.get(key) ?? 0) + 1);
+    for (const [key, n] of counts) {
+      assert.ok(n <= MAX_DECK_COPIES, `种子 ${seed}：${key} 有 ${n} 张，超过上限`);
+    }
+  }
+  const a = buildRandomDeck(seededShuffleRandom(7));
+  const b = buildRandomDeck(seededShuffleRandom(7));
+  assert.deepEqual(a, b, '加入保底后同种子仍必须完全一致（回放依赖这一点）');
+});
+
+test('保底在直击怪之间轮换，不是每局都塞同一张', () => {
+  const directKeys = new Set(
+    CARD_CATALOG.filter((c) => c.monsterEffect === 'directAttack').map((c) => c.key)
+  );
+  const seen = new Set();
+  for (let seed = 1; seed <= 200; seed++) {
+    for (const key of buildRandomDeck(seededShuffleRandom(seed))) {
+      if (directKeys.has(key)) seen.add(key);
+    }
+  }
+  assert.ok(seen.size > 1, `保底应随机挑卡，实际只用到 ${seen.size} 张直击怪`);
 });

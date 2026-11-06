@@ -506,7 +506,10 @@ test('新一轮开始时清除上一回合的攻击标记与召唤次数', async
   c1.stop();
 });
 
-test('首发玩家随机：不同种子先后手不同（种子化，可回放）', async () => {
+// 为什么不断言「某个具体种子 → 某个具体先发方」：先发方取决于开局时 random 的
+// 消耗顺序（setup 抽卡组也会用随机数），任何改动组牌逻辑的提交都会让这种断言
+// 无意义地变红。这里只断言性质：多种子里两种先发都出现 + 同种子可重放。
+test('首发玩家随机：多种子既有玩家 0 也有玩家 1，且同种子可重放', async () => {
   const firstPlayer = (seed) =>
     new Promise((resolve) => {
       const multiplayer = Local();
@@ -517,8 +520,16 @@ test('首发玩家随机：不同种子先后手不同（种子化，可回放�
         c.stop();
       }, 120);
     });
-  assert.equal(await firstPlayer('fp-a'), '1', 'seed fp-a 应由玩家 1 先发');
-  assert.equal(await firstPlayer('fp-e'), '0', 'seed fp-e 应由玩家 0 先发');
+  const seeds = ['fp-a', 'fp-b', 'fp-c', 'fp-d', 'fp-e', 'fp-f'];
+  const got = [];
+  for (const seed of seeds) got.push(await firstPlayer(seed));
+  assert.ok(
+    got.includes('0') && got.includes('1'),
+    `不同种子应两种先发都出现（否则就是「每次都对手先」回归），实际：${seeds.map((s, i) => `${s}=${got[i]}`).join(' ')}`
+  );
+  const replay = [];
+  for (const seed of seeds.slice(0, 3)) replay.push(await firstPlayer(seed));
+  assert.deepEqual(replay, got.slice(0, 3), '同一种子重复开局必须先发一致（回放/重连依赖确定性）');
 });
 
 // ---- 改变表示形式（主要阶段点自己怪兽，2026-03 玩家要求）----

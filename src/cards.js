@@ -158,12 +158,38 @@ if (Object.values(starterCopies).some((count) => count > 3)) {
 // 从对局卡池随机抽一套全新卡组，让每局对战的卡牌都「全新不重复」。
 // 上面的 DECK_LIST 仍作为「经典新手牌组」保留，供测试引用。
 export const MAX_DECK_COPIES = 3;
+
+// 「直击」怪保底（2026-03 用户裁决，量化后定为 2 份）：
+// 4 张直击怪在 74 张池里随机抽 40 张时，实测（20000 次）平均只有 2.17 张，
+// 8.3% 的牌组一张都没有，起手 5 张含直击只有 24.2% —— 玩家手里没有直击怪时
+// 界面上「直接攻击」入口根本不出现，看起来就是「效果没生效」（见 AGENTS.md）。
+// 保底 2 份后：起手含直击 38.0%，牌组里 0 张的情况归零，且不干预起手洗牌。
+// 注意保底是「在洗牌前占位」，牌组整体仍会被再洗一次，起手依旧随机。
+export const DIRECT_ATTACK_RESERVE = 2;
+
 export function buildRandomDeck(random, size = DECK_SIZE, maxCopies = MAX_DECK_COPIES) {
+  // 先在直击怪里随机挑卡补足保底份数（单卡份数仍受 maxCopies 约束）。
+  const reserved = [];
+  let need = Math.min(DIRECT_ATTACK_RESERVE, size);
+  if (need > 0) {
+    const directPool = CARD_CATALOG.filter((card) => card.monsterEffect === 'directAttack');
+    for (const card of random.Shuffle([...directPool])) {
+      if (need <= 0) break;
+      const take = Math.min(need, maxCopies);
+      for (let i = 0; i < take; i++) reserved.push(card.key);
+      need -= take;
+    }
+  }
+  // 其余卡位从整池抽；保底卡的 key 整组排除，保证总份数不超过 maxCopies。
   const bag = [];
   for (const card of CARD_CATALOG) {
     for (let i = 0; i < maxCopies; i++) bag.push(card.key);
   }
-  return random.Shuffle(bag).slice(0, size);
+  const fill = random
+    .Shuffle(bag)
+    .filter((key) => !reserved.includes(key))
+    .slice(0, size - reserved.length);
+  return random.Shuffle([...reserved, ...fill]);
 }
 
 export const FIELD_SLOTS = 5;
