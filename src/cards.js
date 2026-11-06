@@ -159,17 +159,28 @@ if (Object.values(starterCopies).some((count) => count > 3)) {
 // 上面的 DECK_LIST 仍作为「经典新手牌组」保留，供测试引用。
 export const MAX_DECK_COPIES = 3;
 
-// 「直击」怪保底（2026-03 用户裁决，量化后定为 2 份）：
+// 「直击」怪保底（2026-03 用户裁决，量化后定为 2 份；卡池扩容到 302 张时同步提到 3 份）：
 // 4 张直击怪在 74 张池里随机抽 40 张时，实测（20000 次）平均只有 2.17 张，
 // 8.3% 的牌组一张都没有，起手 5 张含直击只有 24.2% —— 玩家手里没有直击怪时
 // 界面上「直接攻击」入口根本不出现，看起来就是「效果没生效」（见 AGENTS.md）。
 // 保底 2 份后：起手含直击 38.0%，牌组里 0 张的情况归零，且不干预起手洗牌。
+// 卡池扩到 302 张后，同样是 2 份保底，起手率被普通怪的增量稀释回 29.6%——
+// 等于把当年的坑悄悄挖回来。保底同步提到 3 份后：起手 38.6%、直击 3.63 份/牌组，
+// 与扩容前持平（扩容前的入口可得性不该因为池子变大而退化）。
 // 注意保底是「在洗牌前占位」，牌组整体仍会被再洗一次，起手依旧随机。
-export const DIRECT_ATTACK_RESERVE = 2;
+export const DIRECT_ATTACK_RESERVE = 3;
+
+// 效果怪保底（2026-03 用户裁决，与《卡池扩容到 302 张》同批加入）：
+// 扩容把普通怪从 55 张涨到 280 张，而打上效果标记的怪兽只有 17 张——「整段
+// 文本恰好一条简单效果」是严格锚定的天花板，短期上不去。实测效果怪份数因此从
+// 8.75 张/牌组掉到 4.03 张，正是 AGENTS.md 记过的「功能做完却几乎不触发」。
+// 保底 6 份后回到 9.5 张/牌组（与扩容前持平），跨局重复仍有 5.7 张。
+// 与直击保底同构：洗牌前占位，单卡总份数仍受 maxCopies 约束，不干预起手。
+export const EFFECT_MONSTER_RESERVE = 6;
 
 export function buildRandomDeck(random, size = DECK_SIZE, maxCopies = MAX_DECK_COPIES) {
-  // 先在直击怪里随机挑卡补足保底份数（单卡份数仍受 maxCopies 约束）。
   const reserved = [];
+  // 1) 直击怪保底：先从直击怪里随机挑卡占位（单卡份数仍受 maxCopies 约束）。
   let need = Math.min(DIRECT_ATTACK_RESERVE, size);
   if (need > 0) {
     const directPool = CARD_CATALOG.filter((card) => card.monsterEffect === 'directAttack');
@@ -180,7 +191,23 @@ export function buildRandomDeck(random, size = DECK_SIZE, maxCopies = MAX_DECK_C
       need -= take;
     }
   }
-  // 其余卡位从整池抽；保底卡的 key 整组排除，保证总份数不超过 maxCopies。
+  // 2) 效果怪保底：直击怪已占好位，其余效果类（贯通/灼烧/强化/抽牌）再保底
+  //    EFFECT_MONSTER_RESERVE 份。同一张卡的累计份数仍不超过 maxCopies。
+  let needEffect = Math.min(EFFECT_MONSTER_RESERVE, size - reserved.length);
+  if (needEffect > 0) {
+    const effectPool = CARD_CATALOG.filter(
+      (card) => card.monsterEffect && card.monsterEffect !== 'directAttack'
+    );
+    for (const card of random.Shuffle([...effectPool])) {
+      if (needEffect <= 0) break;
+      const taken = reserved.filter((key) => key === card.key).length;
+      const take = Math.min(needEffect, maxCopies - taken);
+      if (take <= 0) continue;
+      for (let i = 0; i < take; i++) reserved.push(card.key);
+      needEffect -= take;
+    }
+  }
+  // 3) 其余卡位从整池抽；已保底的 key 整组排除，保证总份数不超过 maxCopies。
   const bag = [];
   for (const card of CARD_CATALOG) {
     for (let i = 0; i < maxCopies; i++) bag.push(card.key);

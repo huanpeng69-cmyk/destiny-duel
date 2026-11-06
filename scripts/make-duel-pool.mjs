@@ -3,7 +3,9 @@
 //
 // 为什么单独出一个脚本而不是直接 bundle 完整卡库：
 //   cards.catalog.json 有 14586 张（13.9MB），全部塞进游戏包太胖；
-//   这里只挑出可玩性高、数值平衡的一小撮（约 74 张），既轻量又多样。
+//   这里只挑出可玩性高、数值平衡的一批（C 档 302 张），既轻量，又能撑起
+//   「相邻两局只有约 5 张重样」的跨局新鲜感（74 张时是 18 张，见 AGENTS.md
+//   决策记录《卡池扩容到 302 张》）。
 //
 // 怪兽效果（2025-06 新增，见 AGENTS.md 决策记录）：
 //   本引擎没有连锁/除外/额外卡组/字段系统，所以**不按单卡模拟 OCG 原文**，
@@ -19,8 +21,12 @@
 //
 // 选取规则（确定性，便于提交、便于复现）：
 //   - 保留 14 张经典卡（含 5 张已实现效果的魔法，维持玩法不变）。
-//   - 带效果的怪兽优先入选（配额 EFFECT_QUOTA），按效果类轮询保证多样性。
-//   - 其余名额用普通新手怪按属性 6 路轮询补齐。
+//   - 带效果的怪兽全部入选：卡库里「整段文本恰好一条简单效果」的合格卡只有
+//     17 张，配额上限设 40 只是留余量，实到多少收多少，不再用普通怪补位。
+//   - 其余名额用普通新手怪按属性 6 路轮询补齐（每属性 PER_ATTR 张）。
+//   - 数值门槛：1-8 星、攻击力 0-3000、守备力 0-3000。引擎有祭品规则
+//     （5-6 星 1 祭品、7 星以上 2 祭品，见 cards.js tributesNeeded），
+//     所以 7-8 星大怪可以入池，不必把等级卡在 6 星。
 //   - 命中本地中文卡库的补 zhName/zhDesc，界面直接显示中文，与图鉴一致。
 //
 // 运行：node scripts/make-duel-pool.mjs
@@ -128,9 +134,13 @@ function detectEffect(card) {
 }
 
 // ---- 从卡库挑新手友好的怪兽 ----
+// 扩容依据（见 AGENTS.md 决策记录）：卡库里满足「有中文译名 + 引擎可实现」
+// 的怪兽有 5000+ 张，卡池规模一直是本脚本的配额说了算，不是卡库不够用。
+// C 档（用户裁决）：每属性 48 张 = 288 个怪兽名额，扣掉效果怪 17 张 → 271 张
+// 普通怪，加 14 张经典卡 = 302 张卡池。
 const ATTRS = ['EARTH', 'WATER', 'DARK', 'FIRE', 'LIGHT', 'WIND'];
-const PER_ATTR = 10; // 普通怪每属性取 10 张 -> 60 张
-const EFFECT_QUOTA = 14; // 效果怪目标数量（卡库中"整段仅一条简单效果"的卡实际只有 14 张）
+const PER_ATTR = 48; // 普通怪每属性取 48 张 -> 288 张名额
+const EFFECT_QUOTA = 40; // 效果怪配额上限；合格卡实际只有 17 张，取尽即止
 const TOTAL_MONSTERS = ATTRS.length * PER_ATTR;
 
 const candidates = catalogCards.filter(
@@ -138,9 +148,9 @@ const candidates = catalogCards.filter(
     c.type === 'monster' &&
     ['Normal Monster', 'Effect Monster', 'Tuner'].includes(c.sourceType) &&
     c.name !== '???' &&
-    c.level >= 1 && c.level <= 6 &&
-    c.atk >= 400 && c.atk <= 2500 &&
-    c.def >= 0 && c.def <= 2500 &&
+    c.level >= 1 && c.level <= 8 &&
+    c.atk >= 0 && c.atk <= 3000 &&
+    c.def >= 0 && c.def <= 3000 &&
     !poolKeys.has(c.key) && !poolNames.has(c.name) &&
     // 必须有中文译名：卡池内不允许出现"英文冒充中文"的卡
     Boolean(zhMap[String(c.id)])
@@ -279,10 +289,10 @@ console.log(
 );
 console.log(`  starter kept: ${starterCards.length}`);
 console.log(`  new monsters: ${pool.length - starterCards.length}`);
-console.log(`  effect monsters: ${effectCount} / target ${EFFECT_QUOTA}`);
+const availableEffects = tagged.filter((t) => t.effect).length;
+const effectTarget = Math.min(EFFECT_QUOTA, availableEffects);
+console.log(`  effect monsters: ${effectCount} / available ${availableEffects} (quota ${EFFECT_QUOTA})`);
 console.log(`  by effect: ${JSON.stringify(byEffect)}`);
-if (effectCount < EFFECT_QUOTA) {
-  console.warn(
-    `  WARN: effect quota not met (${effectCount}/${EFFECT_QUOTA}) — card DB has limited clean single-effect cards`
-  );
+if (effectCount < effectTarget) {
+  console.warn(`  WARN: effect quota not met (${effectCount}/${effectTarget}) — card DB has limited clean single-effect cards`);
 }

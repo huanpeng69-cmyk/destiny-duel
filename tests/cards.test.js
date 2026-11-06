@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CARDS, DECK_LIST, DECK_SIZE, buildRandomDeck, MAX_DECK_COPIES, CARD_CATALOG, DIRECT_ATTACK_RESERVE } from '../src/cards.js';
+import { CARDS, DECK_LIST, DECK_SIZE, buildRandomDeck, MAX_DECK_COPIES, CARD_CATALOG, DIRECT_ATTACK_RESERVE, EFFECT_MONSTER_RESERVE } from '../src/cards.js';
 
 test('新手牌组的常见卡牌显示中文名称和效果', () => {
   assert.equal(CARDS.blueEyes.cn, '青眼白龙');
@@ -103,4 +103,51 @@ test('保底在直击怪之间轮换，不是每局都塞同一张', () => {
     }
   }
   assert.ok(seen.size > 1, `保底应随机挑卡，实际只用到 ${seen.size} 张直击怪`);
+});
+
+// ---- 效果怪保底（2026-03 用户裁决：卡池扩容到 302 张时同批加入，保底 6 份）----
+// 背景：扩容把普通怪从 55 张涨到 280 张，而能打标的效果怪只有 17 张，效果怪密度
+// 被稀释到 4.03 份/牌组（扩容前 8.75），正是「功能做完却几乎不触发」的老坑。
+// 保底后回到 9.5 份/牌组，与扩容前持平。
+
+const countEffect = (deck) => deck.filter((key) => CARDS[key].monsterEffect).length;
+
+test('每副随机卡组都保留保底份数的效果怪（含直击怪）', () => {
+  assert.ok(EFFECT_MONSTER_RESERVE >= 1, '保底份数应至少 1 份');
+  const floor = Math.min(
+    DIRECT_ATTACK_RESERVE + EFFECT_MONSTER_RESERVE,
+    DECK_SIZE
+  );
+  for (let seed = 1; seed <= 200; seed++) {
+    const deck = buildRandomDeck(seededShuffleRandom(seed));
+    assert.equal(deck.length, DECK_SIZE, `种子 ${seed} 的牌组长度应不变`);
+    assert.ok(
+      countEffect(deck) >= floor,
+      `种子 ${seed} 的效果怪只有 ${countEffect(deck)} 张，低于保底 ${floor}`
+    );
+  }
+});
+
+test('效果保底也在多张效果怪之间轮换，且不突破单卡张数上限', () => {
+  const effectKeys = new Set(
+    CARD_CATALOG.filter((c) => c.monsterEffect && c.monsterEffect !== 'directAttack').map(
+      (c) => c.key
+    )
+  );
+  const seen = new Set();
+  for (let seed = 1; seed <= 200; seed++) {
+    const deck = buildRandomDeck(seededShuffleRandom(seed));
+    const counts = new Map();
+    for (const key of deck) {
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+      if (effectKeys.has(key)) seen.add(key);
+    }
+    for (const [key, n] of counts) {
+      assert.ok(n <= MAX_DECK_COPIES, `种子 ${seed}：${key} 有 ${n} 张，超过上限`);
+    }
+  }
+  assert.ok(
+    seen.size > EFFECT_MONSTER_RESERVE,
+    `保底应随机挑卡，实际只用到 ${seen.size} 张非直击效果怪`
+  );
 });
