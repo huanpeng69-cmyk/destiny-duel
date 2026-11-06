@@ -8,7 +8,7 @@
 // - 可点击卡牌禁用 hover transform，避免元素在指针下"躲牌"
 // - 棋盘内不做游戏逻辑判断，合法性一律问 hints.js
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { CARDS, ATTRIBUTES, cardArt, START_LP } from './cards.js';
 import {
   planSummon,
@@ -21,7 +21,7 @@ import { specialSummonPlan, graveSummonPlan } from './hints.js';
 import { EFFECT_LABELS, canDirectAttack } from './effects.js';
 import { sfx, ensureUnlocked } from './sfx.js';
 import Tutorial from './tutorial.jsx';
-import { shouldShowTutorial, markTutorialSeen } from './tutorial.js';
+import { shouldShowTutorial, markTutorialSeen, buildTutorialState } from './tutorial.js';
 
 const opponentOf = (id) => (id === '0' ? '1' : '0');
 
@@ -295,6 +295,13 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
     markTutorialSeen();
     setTutorialOpen(false);
   }, []);
+
+  // 指引要判断「玩家做到哪一步了」（点过手牌？进战斗阶段了吗？），
+  // 判定逻辑放在 tutorial.js 的纯函数里，这里只负责把棋盘状态喂进去。
+  const tutorialState = useMemo(
+    () => buildTutorialState({ me, foe, myTurn, isActive, step: G.step, turn: ctx.turn, pendingSummon }),
+    [me, foe, myTurn, isActive, G.step, ctx.turn, pendingSummon]
+  );
 
   // 悬停查看：鼠标事件里取坐标，键盘聚焦时取元素中心
   const showInspectAt = useCallback((cardId, clientX, clientY) => {
@@ -869,7 +876,7 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
       )}
 
       {/* 新手指引：首次进入对局自动弹出（判定见 tutorial.js），读完/跳过都记「看过」。 */}
-      {tutorialOpen && <Tutorial onFinish={closeTutorial} />}
+      {tutorialOpen && <Tutorial state={tutorialState} onFinish={closeTutorial} />}
     </div>
   );
 }

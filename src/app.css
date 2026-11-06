@@ -1255,63 +1255,115 @@ h1 em {
   background: color-mix(in srgb, var(--foe) 12%, transparent);
 }
 
-/* ===================== 新手对战指引 =====================
-   首次进入对局自动弹出（判定在 tutorial.js），6 步依次高亮棋盘对应区域。
-   高亮做法：整屏遮罩变暗，再用 clip-path(evenodd) 在目标矩形处挖一个洞，
-   洞的轮廓由 .tutorial-ring 描一圈金光。
-   不用「巨大 box-shadow 挖洞」那招，是因为 .board 有 overflow: hidden，阴影会被裁掉。 */
+/* ===================== 新手对战指引（就地标注） =====================
+   首次进入对局自动弹出（判定在 tutorial.js）。形态是「就地标注」：
+   气泡贴在它正在讲的那个控件旁边，金圈框住控件本身；气泡只写两件事——
+   📍 位置：这个按钮在屏幕哪儿 / 👉 怎么用：点它会发生什么、接下来点哪儿。
+
+   指针事件分层是「能在现场直接打完一整轮」的前提：
+     .tutorial / .tutorial-veil / .tutorial-ring 全部 pointer-events: none，
+     只有 .tutorial-bubble 可点 —— 玩家能一边看气泡一边点真实按钮，
+     做完对应操作气泡自动前进到下一步。
+   暗底只压到很淡，既提示「看这里」又不遮住棋盘和卡面。
+
+   高亮沿用 clip-path(evenodd) 挖洞（不吃「巨大 box-shadow」那招：
+   .board 是 overflow: hidden，阴影会被裁在棋盘内）。 */
 
 .tutorial {
   position: fixed;
   inset: 0;
-  z-index: 80; /* 高于召唤选择条(5)、卡牌悬停(30)、演出席(20) */
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  padding: var(--sp-4) var(--sp-4) var(--sp-5);
-  /* 整层吞掉点击：引导没走完前不误触游戏操作（挖洞只是视觉上的）。 */
-  pointer-events: auto;
+  z-index: 80; /* 高于召唤选择条(5)、演出席(20)、卡牌悬停(30) */
+  /* 整层不拦点击：指引期间棋盘照常可操作，这是就地引导的核心。 */
+  pointer-events: none;
 }
 
 .tutorial-veil {
   position: absolute;
   inset: 0;
-  background: rgba(6, 8, 12, 0.78);
+  background: rgba(6, 8, 12, 0.34);
+  pointer-events: none;
+  transition: clip-path 0.18s ease;
 }
 
 .tutorial-ring {
   position: absolute;
   border-radius: var(--r);
-  box-shadow: 0 0 0 2px var(--gold), 0 0 28px rgba(243, 207, 112, 0.4);
+  box-shadow: 0 0 0 2px var(--gold), 0 0 24px rgba(243, 207, 112, 0.45);
   pointer-events: none;
+  animation: tutorialPulse 1.8s ease-in-out infinite;
   transition: top 0.18s ease, left 0.18s ease, width 0.18s ease, height 0.18s ease;
 }
+@keyframes tutorialPulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--gold), 0 0 18px rgba(243, 207, 112, 0.32); }
+  50%      { box-shadow: 0 0 0 2px var(--gold-bright), 0 0 30px rgba(243, 207, 112, 0.62); }
+}
 
-.tutorial-card {
-  position: relative;
-  width: min(560px, 100%);
-  padding: var(--sp-4) var(--sp-4) var(--sp-3);
+/* 气泡：贴着控件放，不遮控件本身；只有它自己接得住点击。 */
+.tutorial-bubble {
+  --bubble-bg: #101a2b;
+  position: absolute;
+  z-index: 1;
+  width: min(352px, calc(100vw - 24px));
+  max-height: calc(100vh - 24px);
+  overflow: auto;
+  padding: var(--sp-3) var(--sp-3) var(--sp-2);
   border: 1px solid rgba(243, 207, 112, 0.42);
   border-radius: var(--r-lg);
-  background: linear-gradient(180deg, rgba(24, 35, 58, 0.98), rgba(10, 16, 27, 0.99));
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), inset 0 0 42px rgba(243, 207, 112, 0.07);
-  animation: tutorialRise 0.22s ease-out;
+  background: var(--bubble-bg);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5), inset 0 0 32px rgba(243, 207, 112, 0.06);
+  pointer-events: auto;
+  animation: tutorialFade 0.18s ease-out;
 }
-@keyframes tutorialRise {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: translateY(0); }
+@keyframes tutorialFade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* 指向控件的箭头：一个旋转 45° 的方块，用 --arrow 定位在气泡对应的那条边上。 */
+.tutorial-bubble::before {
+  content: '';
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: var(--bubble-bg);
+  border-radius: 2px;
+  pointer-events: none;
+}
+.tutorial-bubble[data-placement="top"]::before {
+  top: 100%;
+  left: var(--arrow, 50%);
+  margin-top: -6px;
+  transform: translateX(-50%) rotate(45deg);
+}
+.tutorial-bubble[data-placement="bottom"]::before {
+  bottom: 100%;
+  left: var(--arrow, 50%);
+  margin-bottom: -6px;
+  transform: translateX(-50%) rotate(45deg);
+}
+.tutorial-bubble[data-placement="right"]::before {
+  right: 100%;
+  top: var(--arrow, 50%);
+  margin-right: -6px;
+  transform: translateY(-50%) rotate(45deg);
+}
+.tutorial-bubble[data-placement="left"]::before {
+  left: 100%;
+  top: var(--arrow, 50%);
+  margin-left: -6px;
+  transform: translateY(-50%) rotate(45deg);
 }
 
 .tutorial-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--sp-3);
+  gap: var(--sp-2);
 }
 .tutorial-kicker {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.14em;
   color: var(--gold);
 }
 .tutorial-progress {
@@ -1320,43 +1372,73 @@ h1 em {
   font-variant-numeric: tabular-nums;
 }
 .tutorial-title {
-  margin: var(--sp-2) 0;
-  font-size: 18px;
+  margin: 6px 0 var(--sp-2);
+  font-size: 15px;
   line-height: 1.35;
   color: var(--gold-bright);
 }
-.tutorial-body {
-  margin: 0;
-  padding-left: 1.1em;
-  display: grid;
-  gap: 6px;
-  font-size: 13px;
+
+/* 「按钮在哪」与「怎么用」各自一行，前面挂一枚小标签，扫一眼就能对上。 */
+.tutorial-where,
+.tutorial-how {
+  margin: 0 0 6px;
+  font-size: 12.5px;
   line-height: 1.6;
   color: var(--text);
 }
-.tutorial-body li::marker { color: var(--gold-dim); }
+.tutorial-tag {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+.tutorial-where .tutorial-tag {
+  color: var(--gold-bright);
+  background: color-mix(in srgb, var(--gold) 16%, transparent);
+}
+.tutorial-how .tutorial-tag {
+  color: var(--mine);
+  background: color-mix(in srgb, var(--mine) 16%, transparent);
+}
+/* 现场提示（对手回合 / 首回合禁攻 / 对手空场）：只在真会卡住时出现。 */
+.tutorial-hint {
+  margin: 0 0 6px;
+  padding: 5px 8px;
+  border-left: 2px solid var(--gold-dim);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  background: rgba(243, 207, 112, 0.08);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+}
+
 .tutorial-dots {
   display: flex;
-  gap: 6px;
-  margin: var(--sp-3) 0 var(--sp-2);
+  gap: 5px;
+  margin: var(--sp-2) 0 6px;
 }
 .tutorial-dots span {
-  width: 18px;
+  width: 14px;
   height: 3px;
   border-radius: 999px;
   background: var(--line);
   transition: background 0.18s;
 }
 .tutorial-dots .is-on { background: var(--gold); }
+
 .tutorial-actions {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--sp-3);
+  gap: var(--sp-2);
 }
-.tutorial-nav { display: flex; gap: var(--sp-2); }
+.tutorial-nav { display: flex; gap: 6px; }
 .tutorial-skip {
-  padding: 6px 4px;
+  padding: 5px 4px;
   border: 0;
   background: none;
   color: var(--text-faint);
@@ -1367,10 +1449,10 @@ h1 em {
 .tutorial-skip:hover { color: var(--text-dim); }
 .tutorial-prev,
 .tutorial-next {
-  padding: 7px 16px;
+  padding: 5px 12px;
   border-radius: var(--r-sm);
   font: inherit;
-  font-size: 13px;
+  font-size: 12.5px;
   cursor: pointer;
   transition: filter 0.16s ease, border-color 0.16s ease;
 }
@@ -1405,8 +1487,11 @@ h1 em {
 .status-help:hover { background: color-mix(in srgb, var(--gold) 20%, transparent); }
 
 @media (max-width: 720px) {
-  .tutorial { padding: var(--sp-3); }
-  .tutorial-card { padding: var(--sp-3); }
-  .tutorial-title { font-size: 16px; }
-  .tutorial-body { font-size: 12.5px; }
+  .tutorial-bubble {
+    width: min(300px, calc(100vw - 16px));
+    padding: var(--sp-2) var(--sp-2) 6px;
+  }
+  .tutorial-title { font-size: 14px; }
+  .tutorial-where,
+  .tutorial-how { font-size: 12px; }
 }
