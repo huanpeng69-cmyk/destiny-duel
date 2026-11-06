@@ -20,6 +20,8 @@ import {
 import { specialSummonPlan, graveSummonPlan } from './hints.js';
 import { EFFECT_LABELS, canDirectAttack } from './effects.js';
 import { sfx, ensureUnlocked } from './sfx.js';
+import Tutorial from './tutorial.jsx';
+import { shouldShowTutorial, markTutorialSeen } from './tutorial.js';
 
 const opponentOf = (id) => (id === '0' ? '1' : '0');
 
@@ -286,6 +288,13 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
   const [popup, setPopup] = useState(null);
   const [dmgFloat, setDmgFloat] = useState({ '0': 0, '1': 0 });
   const [shake, setShake] = useState(false);
+  // 首次进入对局弹一次新手指引；版本号变化后会再弹一次（见 tutorial.js）。
+  const [tutorialOpen, setTutorialOpen] = useState(() => shouldShowTutorial());
+  const closeTutorial = useCallback(() => {
+    // 读完或跳过都算「看过」，避免每次刷新都弹；写失败（隐私模式）不影响关窗。
+    markTutorialSeen();
+    setTutorialOpen(false);
+  }, []);
 
   // 悬停查看：鼠标事件里取坐标，键盘聚焦时取元素中心
   const showInspectAt = useCallback((cardId, clientX, clientY) => {
@@ -644,6 +653,16 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
           me.field.some((e) => e && e.posTurn !== ctx.turn) && (
             <span className="status-hint">点自己的怪兽可改变攻击⇄守备表示（每只怪兽每回合 1 次）</span>
           )}
+
+        {/* 指引重开入口：首次会自动弹出，之后想再看只能从这里进。 */}
+        <button
+          type="button"
+          className="status-help"
+          onClick={() => setTutorialOpen(true)}
+          aria-label="查看玩法指引"
+        >
+          玩法
+        </button>
       </div>
 
       {pendingSummon && (
@@ -848,6 +867,9 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
           <Stage ev={popup} playerID={playerID} />
         </div>
       )}
+
+      {/* 新手指引：首次进入对局自动弹出（判定见 tutorial.js），读完/跳过都记「看过」。 */}
+      {tutorialOpen && <Tutorial onFinish={closeTutorial} />}
     </div>
   );
 }

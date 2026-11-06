@@ -1254,3 +1254,159 @@ h1 em {
   border-radius: var(--r-sm);
   background: color-mix(in srgb, var(--foe) 12%, transparent);
 }
+
+/* ===================== 新手对战指引 =====================
+   首次进入对局自动弹出（判定在 tutorial.js），6 步依次高亮棋盘对应区域。
+   高亮做法：整屏遮罩变暗，再用 clip-path(evenodd) 在目标矩形处挖一个洞，
+   洞的轮廓由 .tutorial-ring 描一圈金光。
+   不用「巨大 box-shadow 挖洞」那招，是因为 .board 有 overflow: hidden，阴影会被裁掉。 */
+
+.tutorial {
+  position: fixed;
+  inset: 0;
+  z-index: 80; /* 高于召唤选择条(5)、卡牌悬停(30)、演出席(20) */
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: var(--sp-4) var(--sp-4) var(--sp-5);
+  /* 整层吞掉点击：引导没走完前不误触游戏操作（挖洞只是视觉上的）。 */
+  pointer-events: auto;
+}
+
+.tutorial-veil {
+  position: absolute;
+  inset: 0;
+  background: rgba(6, 8, 12, 0.78);
+}
+
+.tutorial-ring {
+  position: absolute;
+  border-radius: var(--r);
+  box-shadow: 0 0 0 2px var(--gold), 0 0 28px rgba(243, 207, 112, 0.4);
+  pointer-events: none;
+  transition: top 0.18s ease, left 0.18s ease, width 0.18s ease, height 0.18s ease;
+}
+
+.tutorial-card {
+  position: relative;
+  width: min(560px, 100%);
+  padding: var(--sp-4) var(--sp-4) var(--sp-3);
+  border: 1px solid rgba(243, 207, 112, 0.42);
+  border-radius: var(--r-lg);
+  background: linear-gradient(180deg, rgba(24, 35, 58, 0.98), rgba(10, 16, 27, 0.99));
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), inset 0 0 42px rgba(243, 207, 112, 0.07);
+  animation: tutorialRise 0.22s ease-out;
+}
+@keyframes tutorialRise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.tutorial-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.tutorial-kicker {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  color: var(--gold);
+}
+.tutorial-progress {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+.tutorial-title {
+  margin: var(--sp-2) 0;
+  font-size: 18px;
+  line-height: 1.35;
+  color: var(--gold-bright);
+}
+.tutorial-body {
+  margin: 0;
+  padding-left: 1.1em;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+}
+.tutorial-body li::marker { color: var(--gold-dim); }
+.tutorial-dots {
+  display: flex;
+  gap: 6px;
+  margin: var(--sp-3) 0 var(--sp-2);
+}
+.tutorial-dots span {
+  width: 18px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--line);
+  transition: background 0.18s;
+}
+.tutorial-dots .is-on { background: var(--gold); }
+.tutorial-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.tutorial-nav { display: flex; gap: var(--sp-2); }
+.tutorial-skip {
+  padding: 6px 4px;
+  border: 0;
+  background: none;
+  color: var(--text-faint);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.tutorial-skip:hover { color: var(--text-dim); }
+.tutorial-prev,
+.tutorial-next {
+  padding: 7px 16px;
+  border-radius: var(--r-sm);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: filter 0.16s ease, border-color 0.16s ease;
+}
+.tutorial-prev {
+  border: 1px solid var(--line);
+  background: rgba(24, 35, 58, 0.9);
+  color: var(--text);
+}
+.tutorial-prev:disabled { opacity: 0.4; cursor: default; }
+.tutorial-prev:not(:disabled):hover { border-color: var(--gold-dim); }
+.tutorial-next {
+  border: 1px solid rgba(243, 207, 112, 0.66);
+  background: linear-gradient(180deg, var(--gold-bright), var(--gold-dim));
+  color: #1b1408;
+  font-weight: 700;
+}
+.tutorial-next:hover { filter: brightness(1.06); }
+.tutorial-next:focus-visible { outline: 2px solid var(--mine); outline-offset: 2px; }
+
+/* 状态栏里的「玩法」重开入口：首次自动弹出，之后从这里再看 */
+.status-help {
+  margin-left: auto;
+  padding: 2px 9px;
+  border: 1px solid color-mix(in srgb, var(--gold) 45%, transparent);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--gold) 10%, transparent);
+  color: var(--gold);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.status-help:hover { background: color-mix(in srgb, var(--gold) 20%, transparent); }
+
+@media (max-width: 720px) {
+  .tutorial { padding: var(--sp-3); }
+  .tutorial-card { padding: var(--sp-3); }
+  .tutorial-title { font-size: 16px; }
+  .tutorial-body { font-size: 12.5px; }
+}
