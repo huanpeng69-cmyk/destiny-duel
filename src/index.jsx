@@ -15,6 +15,7 @@ import { createBotClient } from './bot.js';
 import { CARD_CATALOG, cardDescriptionForDisplay, cardNameForDisplay } from './cards.js';
 import { setSfx, sfxEnabled, ensureUnlocked } from './sfx.js';
 import './app.css';
+import './fx.css';
 
 // 页面加载时间戳：保证每次刷新都拿到全新的 matchID。
 // 没有它，刷新页面会复用 'duel-0' 这一旧棋局，随机种子不变，

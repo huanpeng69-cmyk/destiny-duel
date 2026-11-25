@@ -1,0 +1,249 @@
+
+/* =========================================================================
+   战斗演出层（fx）
+   -------------------------------------------------------------------------
+   设计要点：
+   1. 全部是「临时类名 + 一次动画」，动画结束由 board 的帧序列清类名，
+      不用 animation-fill-mode: forwards —— 否则卡牌会永远停在位移后的位置。
+   2. 位移量由 JS 量取真实 DOM 后写成 CSS 变量 --fx-dx / --fx-dy / --fx-scale。
+      CSS 只负责轨迹形状（冲出去 → 停顿 → 回位），不猜坐标。
+   3. 这一层只影响观感，删掉整段不影响任何游戏逻辑。
+   4. 系统开启「减少动态效果」(prefers-reduced-motion) 时全部降级为无动画，
+      但保留颜色反馈（掉血闪红、碎裂透明度），保证信息不丢。
+   ========================================================================= */
+
+/* ---- 卡牌冲撞 ------------------------------------------------------------
+   transform 的起点是 translate(0,0) 也就是槽位原位，
+   变量由 board.jsx 在 lunge 帧写入对应槽位元素。 */
+.slot.fx-lunge {
+  z-index: 20;
+  animation: fxLunge 260ms cubic-bezier(0.2, 0.9, 0.25, 1) forwards;
+}
+
+@keyframes fxLunge {
+  0% {
+    transform: translate(0, 0) scale(1);
+  }
+  58% {
+    transform: translate(calc(var(--fx-dx, 0px) * 0.92), calc(var(--fx-dy, 0px) * 0.92))
+      scale(calc(var(--fx-scale, 1) * 1.06));
+  }
+  100% {
+    transform: translate(var(--fx-dx, 0px), var(--fx-dy, 0px)) scale(var(--fx-scale, 1));
+  }
+}
+
+/* 命中后停在目标位，等回位帧清掉类名；停住时给一点金色描边表示「打中了」 */
+.slot.fx-lunge.fx-done {
+  animation: none;
+  transform: translate(var(--fx-dx, 0px), var(--fx-dy, 0px)) scale(var(--fx-scale, 1));
+  filter: drop-shadow(0 0 12px rgba(255, 233, 163, 0.55));
+}
+
+/* ---- 受击抖动 ------------------------------------------------------------ */
+.slot.fx-hit {
+  animation: fxHit 240ms ease-out;
+}
+
+@keyframes fxHit {
+  0% { transform: translate(0, 0); }
+  18% { transform: translate(-6px, 2px) rotate(-1.4deg); }
+  36% { transform: translate(6px, -2px) rotate(1.4deg); }
+  54% { transform: translate(-4px, 1px) rotate(-0.8deg); }
+  72% { transform: translate(3px, -1px) rotate(0.5deg); }
+  100% { transform: translate(0, 0); }
+}
+
+/* ---- 被破坏：碎裂散开 ----------------------------------------------------
+   用两层伪元素做「碎片」，不需要额外 DOM；
+   透明度 0 收尾，实际移除由引擎状态驱动（卡进了墓地，槽位自然空）。 */
+.slot.fx-break .card {
+  animation: fxBreak 320ms ease-in forwards;
+}
+
+.slot.fx-break::before,
+.slot.fx-break::after {
+  content: '';
+  position: absolute;
+  inset: 12%;
+  border-radius: 6px;
+  pointer-events: none;
+  background: linear-gradient(135deg, rgba(255, 233, 163, 0.5), transparent 65%);
+  animation: fxShard 340ms ease-out forwards;
+}
+
+.slot.fx-break::after {
+  animation-delay: 40ms;
+  background: linear-gradient(220deg, rgba(255, 143, 120, 0.42), transparent 65%);
+}
+
+@keyframes fxBreak {
+  0% { opacity: 1; filter: brightness(1); }
+  22% { opacity: 1; filter: brightness(2.4) saturate(0.6); }
+  100% { opacity: 0; filter: brightness(0.7); transform: scale(0.86); }
+}
+
+@keyframes fxShard {
+  0% { opacity: 0.9; transform: scale(0.9) rotate(0deg); }
+  100% { opacity: 0; transform: scale(1.35) rotate(9deg); }
+}
+
+/* ---- 血条受击闪红 --------------------------------------------------------
+   在掉血那一帧加 .is-hit，让「砍中」和「掉血」同时发生。 */
+.life.is-hit .life-track {
+  box-shadow: 0 0 0 1px rgba(255, 111, 115, 0.85), 0 0 22px rgba(255, 80, 80, 0.5);
+}
+
+.life.is-hit .life-fill {
+  animation: fxLifeBlink 520ms ease-out;
+}
+
+.life.is-hit .life-num {
+  animation: fxNumPunch 420ms cubic-bezier(0.2, 1.4, 0.4, 1);
+}
+
+@keyframes fxLifeBlink {
+  0% { filter: brightness(2.6) saturate(0.4); }
+  40% { filter: brightness(1.4); }
+  100% { filter: brightness(1); }
+}
+
+@keyframes fxNumPunch {
+  0% { transform: scale(1.32); }
+  100% { transform: scale(1); }
+}
+
+/* ---- 回合转场：扫光 + 回合字 ----------------------------------------------
+   纯装饰层，pointer-events: none，绝不拦点击。 */
+.turn-sweep {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  pointer-events: none;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.turn-sweep::before {
+  content: '';
+  position: absolute;
+  left: -30%;
+  right: -30%;
+  height: 46%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(243, 207, 112, 0.16) 35%,
+    rgba(255, 233, 163, 0.3) 50%,
+    rgba(243, 207, 112, 0.16) 65%,
+    transparent
+  );
+  filter: blur(2px);
+}
+
+/* 自己的回合：光从下往上扫；对手回合：从上往下 */
+.board.turn-up .turn-sweep::before {
+  animation: fxSweepUp 900ms ease-out forwards;
+}
+.board.turn-down .turn-sweep::before {
+  animation: fxSweepDown 900ms ease-out forwards;
+}
+
+.turn-sweep-label {
+  position: relative;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  color: var(--gold-bright);
+  text-shadow: 0 0 24px rgba(243, 207, 112, 0.55), 0 2px 10px rgba(0, 0, 0, 0.6);
+  animation: fxTurnLabel 900ms ease-out forwards;
+}
+
+@keyframes fxSweepUp {
+  0% { top: 105%; opacity: 0; }
+  25% { opacity: 1; }
+  100% { top: -46%; opacity: 0; }
+}
+
+@keyframes fxSweepDown {
+  0% { top: -46%; opacity: 0; }
+  25% { opacity: 1; }
+  100% { top: 105%; opacity: 0; }
+}
+
+@keyframes fxTurnLabel {
+  0% { opacity: 0; transform: translateY(10px) scale(0.94); }
+  22% { opacity: 1; transform: translateY(0) scale(1); }
+  70% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-8px) scale(1.02); }
+}
+
+/* ---- 终局：战场压暗 + 大字砸入 ------------------------------------------- */
+.board.is-over {
+  position: relative;
+}
+
+.board.is-over.fx-on::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 50%, rgba(4, 6, 10, 0.35), rgba(4, 6, 10, 0.86));
+  animation: fxDarken 900ms ease-out forwards;
+  z-index: 40;
+}
+
+@keyframes fxDarken {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+.board.is-over .over {
+  position: relative;
+  z-index: 41;
+}
+
+.board.is-over.fx-on .over-title {
+  animation: fxOverTitle 900ms cubic-bezier(0.16, 1.3, 0.3, 1) 260ms backwards;
+}
+
+.board.is-over.fx-on .over-reason {
+  animation: fxOverReason 700ms ease-out 620ms backwards;
+}
+
+@keyframes fxOverTitle {
+  0% { opacity: 0; transform: scale(2.1); filter: blur(8px); }
+  60% { opacity: 1; transform: scale(0.96); filter: blur(0); }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes fxOverReason {
+  0% { opacity: 0; transform: translateY(8px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+/* ---- 降级：系统要求减少动态时 --------------------------------------------
+   全部动画关掉，但保留颜色/透明度这类「非运动」反馈，
+   这样弱机型、晕动症用户仍然能看出「打中了 / 破了 / 谁赢了」。 */
+@media (prefers-reduced-motion: reduce) {
+  .slot.fx-lunge,
+  .slot.fx-lunge.fx-done,
+  .slot.fx-hit,
+  .slot.fx-break .card,
+  .slot.fx-break::before,
+  .slot.fx-break::after,
+  .life.is-hit .life-fill,
+  .life.is-hit .life-num,
+  .turn-sweep::before,
+  .turn-sweep-label,
+  .board.is-over.fx-on::after,
+  .board.is-over.fx-on .over-title,
+  .board.is-over.fx-on .over-reason {
+    animation: none !important;
+  }
+
+  .slot.fx-break .card { opacity: 0.4; }
+  .turn-sweep { display: none; }
+  .life.is-hit .life-track { box-shadow: 0 0 0 1px rgba(255, 111, 115, 0.85); }
+}

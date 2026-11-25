@@ -20,10 +20,39 @@ import {
 import { specialSummonPlan, graveSummonPlan } from './hints.js';
 import { EFFECT_LABELS, canDirectAttack } from './effects.js';
 import { sfx, ensureUnlocked } from './sfx.js';
+import {
+  attackSequence,
+  bannerSequence,
+  turnTransition,
+  translateTo,
+  shouldAnimate,
+  scheduleFrames,
+  ATTACK_DURATION,
+  BANNER_MS,
+} from './fx.js';
 import Tutorial from './tutorial.jsx';
 import { shouldShowTutorial, markTutorialSeen, buildTutorialState } from './tutorial.js';
 
 const opponentOf = (id) => (id === '0' ? '1' : '0');
+
+// 演出层：在真实 DOM 里按「卡面 id」反查它挂在哪个槽位。
+// 引擎的 fx 事件只带卡面 id（attacker / target / victim），不带槽位号，
+// 而动画必须知道「哪一格要飞出去」。data-card 属性由 CardFace 写入。
+// 取不到（卡已被破坏、jsdom 无布局）就返回 null，调用方跳过动画。
+function findSlotKey(root, role, ev, playerID) {
+  if (!root || typeof root.querySelectorAll !== 'function') return null;
+  const cardId =
+    role === 'attacker' ? ev.attacker : role === 'defender' ? ev.target : ev.victim;
+  if (!cardId) return null;
+  // 事件发起方决定「我方/对方」视角：ev.who 是发起事件的玩家。
+  const side = ev.who === playerID ? 'my' : 'foe';
+  // 攻击方在自己这边，守方/受害者在对面场地。
+  const wanted = role === 'attacker' ? side : side === 'my' ? 'foe' : 'my';
+  const nodes = root.querySelectorAll(`[data-slot^="${wanted}-"] [data-card="${cardId}"]`);
+  if (!nodes || nodes.length === 0) return null;
+  const slot = nodes[0].closest?.('[data-slot]');
+  return slot ? slot.getAttribute('data-slot') : null;
+}
 
 // ---- 卡面 ----
 // 图片可选：public/cards/<id>.jpg 存在就盖在 CSS 卡面上，不存在就露出
@@ -37,6 +66,9 @@ function CardFace({ cardId, size = 'md' }) {
   return (
     <div
       className={`card card-${size} ${isSpell ? 'is-spell' : 'is-monster'}`}
+      // data-card 是演出层的反查锚点：fx 事件只给卡面 id，
+      // 动画要靠它找到「这张卡现在挂在哪个槽位」。
+      data-card={cardId}
       style={{ '--attr': attr.color, '--edge': attr.edge }}
     >
       <div className="card-name">{card.cn}</div>
@@ -133,18 +165,23 @@ function CardInspect({ cardId, x, y }) {
   );
 }
 
-// ---- 场上的一个槽位 ----
-function Slot({ entry, side, onClick, highlight, onInspect, onInspectMove }) {
+// fxClass：演出层临时挂上去的类名（fx-lunge / fx-hit / fx-break），
+// 由 board 按帧序列写入，动画结束后自动清空。卡片渲染逻辑本身不变。
+function Slot({ entry, side, index = 0, onClick, highlight, onInspect, onInspectMove, fxClass = '' }) {
   const clickable = Boolean(onClick);
   return (
     <button
       type="button"
+      // data-slot 是演出层的测量锚点：board 用它定位「哪一张卡要冲向哪一张」，
+      // 纯呈现属性，不参与任何游戏判定。
+      data-slot={`${side}-${index}`}
       className={[
         'slot',
         `slot-${side}`,
         entry ? 'has-card' : '',
         clickable ? 'is-clickable' : '',
         highlight ? 'is-target' : '',
+        fxClass,
       ]
         .join(' ')
         .trim()}
@@ -189,10 +226,12 @@ function SpellTrapRow({ entries, side }) {
   );
 }
 
-function LifeBar({ label, lp, side, float }) {
+// hit：命中瞬间由演出层置为 true，血条闪红一下，让「掉血」和「被打中」
+// 在同一帧发生（原来是先飘字、血条滞后改宽度，读起来像两件事）。
+function LifeBar({ label, lp, side, float, hit = false }) {
   const pct = Math.max(0, Math.min(100, (lp / START_LP) * 100));
   return (
-    <div className={`life life-${side}`}>
+    <div className={`life life-${side} ${hit ? 'is-hit' : ''}`}>
       <div className="life-head">
         <span className="life-name">{label}</span>
         <span className="life-num">{lp}</span>
@@ -329,11 +368,58 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
   const lastFxId = useRef(0);
   const prevLp = useRef({ '0': me.lp, '1': foe.lp });
   const popupTimer = useRef(null);
+  // 演出层的临时状态：哪几张卡在飞/受击/碎裂，谁的回合转场在放。
+  // 这些只是 CSS 类名，不参与任何游戏判定。
+  const [fxSlots, setFxSlots] = useState({}); // { 'my-0': 'fx-lunge', ... }
+  const [lifeHit, setLifeHit] = useState({}); // { '0': true } 血条闪红
+  const [turnFx, setTurnFx] = useState(null); // { dir, key }
+  const cancelFx = useRef(null); // 当前演出的取消器
+  const overSfxDone = useRef(-1); // 终局音效记账（见 ctx.gameover 分支）
+  const boardRef = useRef(null); // 测量容器
 
   const say = useCallback((text) => setMsg(text), []);
   const deny = useCallback((reason) => {
     setMsg(reason);
     sfx.deny();
+  }, []);
+
+  // 量取某张卡在屏幕上的真实位置。槽位带了 data-slot="${side}-${index}"，
+  // 找不到（卡已被破坏、元素未挂载）就返回 null，调用方跳过动画。
+  const rectOf = useCallback((key) => {
+    const root = boardRef.current;
+    if (!root || !key) return null;
+    const el = root.querySelector(`[data-slot="${key}"]`);
+    if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+    const r = el.getBoundingClientRect();
+    if (!r || (r.width === 0 && r.height === 0)) return null;
+    return { x: r.x, y: r.y, width: r.width, height: r.height };
+  }, []);
+
+  // 槽位 key：事件里的 who 是事件类别（attacker/defender），
+  // 具体落在哪个槽位要靠引擎在事件里传的 dir 与当前视角换算。
+  const slotKeyFor = useCallback(
+    (who) => {
+      if (!currentFx.current) return null;
+      const ev = currentFx.current;
+      const side = ev.who === playerID ? 'my' : 'foe';
+      if (who === 'attacker') return `${side}-${ev.attackerSlot}`;
+      if (who === 'defender') return `${side === 'my' ? 'foe' : 'my'}-${ev.targetSlot}`;
+      return null;
+    },
+    [playerID]
+  );
+  // 当前正在演的事件：帧回调里要读「最新一次事件」，用 ref 持有。
+  const currentFx = useRef(null);
+  // 播放一段帧序列：每帧只改 CSS 类名与音效，绝不改游戏状态。
+  // 新演出开始前先取消旧演出，避免连续攻击时两套动画打架。
+  const playFrames = useCallback((frames, onFrame) => {
+    if (cancelFx.current) cancelFx.current();
+    cancelFx.current = scheduleFrames(frames, onFrame);
+  }, []);
+
+  useEffect(() => () => {
+    if (cancelFx.current) cancelFx.current();
+    if (popupTimer.current) clearTimeout(popupTimer.current);
   }, []);
 
   // ---- 演出事件：只演对手的动作与双方的攻击，我方出牌零弹窗 ----
@@ -345,39 +431,177 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
     const ev = fresh[fresh.length - 1];
     const mine = ev.who === playerID;
 
-    // 最新事件直接替换当前画面，任何时刻最多一个弹窗（skill 铁律：
-    // 绝不排队逐个弹出）
-    const showStage = (e) => {
+    // 最新事件直接替换当前画面，任何时刻最多一个弹窗（铁律：绝不排队逐个弹出）
+    const showStage = (e, ms = 1500) => {
       setPopup(e);
       if (popupTimer.current) clearTimeout(popupTimer.current);
-      popupTimer.current = setTimeout(() => setPopup(null), 1500);
+      popupTimer.current = setTimeout(() => setPopup(null), ms);
     };
 
+    // 用户在设置里关掉演出（或系统要求减少动态）：退回改动前的最小行为。
+    if (!shouldAnimate()) {
+      if (ev.kind === 'summon') {
+        sfx.summon();
+        if (!mine) showStage(ev);
+      } else if (ev.kind === 'spell') {
+        sfx.spell();
+        if (!mine) showStage(ev);
+      } else if (ev.kind === 'effect') {
+        if (ev.effect === 'destroyBurn') sfx.hit();
+        else if (ev.effect === 'summonDraw') sfx.draw();
+        else sfx.spell();
+        showStage(ev);
+      } else if (ev.kind === 'attack') {
+        sfx.attack();
+        if (ev.dmg > 0) {
+          sfx.hit();
+          if (ev.dmg >= 1500) {
+            setShake(true);
+            setTimeout(() => setShake(false), 320);
+          }
+        }
+        showStage(ev);
+      }
+      return;
+    }
+
+    if (ev.kind === 'attack') {
+      currentFx.current = ev;
+      // 攻守双方在哪个槽位：引擎事件里没带槽位，用当前视角 + 事件里的
+      // attacker/defender 卡面反查 DOM 上的槽位，取不到就跳过冲撞动画。
+      const attackerKey = findSlotKey(boardRef.current, 'attacker', ev, playerID);
+      const defenderKey =
+        ev.target != null ? findSlotKey(boardRef.current, 'defender', ev, playerID) : null;
+      const from = rectOf(attackerKey);
+      // 直接攻击没有守方卡，就让攻击方冲向对方血条
+      const to = defenderKey
+        ? rectOf(defenderKey)
+        : rectOf(playerID === '0' ? 'foe-panel' : 'my-panel');
+      const move = translateTo(from, to);
+
+      const frames = attackSequence(ev);
+      // 弹窗比演出多留 600ms：先看完「卡飞过去、对面炸了」，再读「破坏 -1200」。
+      showStage(ev, ATTACK_DURATION + 600);
+      playFrames(frames, (frame) => {
+        if (frame.kind === 'lunge') {
+          sfx.attack();
+          if (move) {
+            setFxSlots({ [attackerKey]: 'fx-lunge' });
+            // CSS 变量承载位移量：--fx-dx / --fx-dy / --fx-scale
+            const el = boardRef.current?.querySelector(`[data-slot="${attackerKey}"]`);
+            if (el) {
+              el.style.setProperty('--fx-dx', `${move.dx}px`);
+              el.style.setProperty('--fx-dy', `${move.dy}px`);
+              el.style.setProperty('--fx-scale', String(move.scale));
+            }
+          }
+        } else if (frame.kind === 'impact') {
+          const victimId = ev.who === playerID ? opponentOf(playerID) : playerID;
+          setFxSlots((prev) => {
+            const next = { ...prev };
+            if (defenderKey) next[defenderKey] = 'fx-hit';
+            next[attackerKey] = 'fx-lunge fx-done';
+            return next;
+          });
+          if (frame.dmg > 0) {
+            sfx.hit();
+            setLifeHit((prev) => ({ ...prev, [victimId]: true }));
+            setTimeout(() => setLifeHit((prev) => ({ ...prev, [victimId]: false })), 520);
+            if (frame.dmg >= 1500) {
+              setShake(true);
+              setTimeout(() => setShake(false), 320);
+            }
+          } else {
+            // 破壁没扣血也要有「打中了」的手感
+            sfx.hit();
+          }
+        } else if (frame.kind === 'break') {
+          const key = frame.who === 'defender' ? defenderKey : attackerKey;
+          const exists = boardRef.current?.querySelector(`[data-slot="${key}"] .card`);
+          // 免疫破坏时卡还在场上：这时候不该演碎裂
+          if (key && exists) {
+            sfx.destroy();
+            // 追加而不是覆盖：break 与 impact 是同一毫秒的两帧，
+            // 整体覆盖会把刚挂上的 fx-hit 冲掉，受击抖动根本看不见
+            // （实测时间线里 foe-1 只有 fx-break，fx-hit 从未出现）。
+            setFxSlots((prev) => {
+              const cur = prev[key] || '';
+              const next = cur.includes('fx-break') ? cur : `${cur} fx-break`.trim();
+              return { ...prev, [key]: next };
+            });
+          }
+        } else if (frame.kind === 'retreat') {
+          setFxSlots((prev) => {
+            const next = { ...prev };
+            if (next[attackerKey] === 'fx-lunge fx-done') next[attackerKey] = '';
+            return next;
+          });
+        } else if (frame.kind === 'settle') {
+          setFxSlots({});
+          currentFx.current = null;
+          // 注意：这里不关弹窗。演出负责「动」，弹窗负责「说结果」，
+          // 两者时长不同步 —— 曾在 settle 里 setPopup(null)，导致「破坏 -1200」
+          // 这类关键结果与演出同帧消失、玩家根本来不及读。
+          // 弹窗由 showStage 自己的计时器管（比演出多留 600ms）。
+          // 清掉内联的 CSS 变量，免得下一场用旧的位移
+          for (const key of [attackerKey, defenderKey]) {
+            const el = boardRef.current?.querySelector(`[data-slot="${key}"]`);
+            if (el) {
+              el.style.removeProperty('--fx-dx');
+              el.style.removeProperty('--fx-dy');
+              el.style.removeProperty('--fx-scale');
+            }
+          }
+        }
+      });
+      return;
+    }
+
+    // 召唤 / 魔法 / 怪兽效果：弹窗 + 对应特效帧
     if (ev.kind === 'summon') {
       sfx.summon();
-      if (!mine) showStage(ev);
-    } else if (ev.kind === 'spell') {
-      sfx.spell();
-      if (!mine) showStage(ev);
-    } else if (ev.kind === 'effect') {
+      if (!mine) showStage(ev, BANNER_MS);
+      return;
+    }
+    if (ev.kind === 'spell') sfx.spell();
+    else if (ev.kind === 'effect') {
       if (ev.effect === 'destroyBurn') sfx.hit();
       else if (ev.effect === 'summonDraw') sfx.draw();
       else sfx.spell();
-      showStage(ev);
-    } else if (ev.kind === 'attack') {
-      sfx.attack();
-      if (ev.dmg > 0) {
-        sfx.hit();
-        if (ev.dmg >= 1500) {
-          setShake(true);
-          setTimeout(() => setShake(false), 320);
-        }
-      }
-      showStage(ev);
     }
-  }, [G.fx, playerID]);
 
-  useEffect(() => () => popupTimer.current && clearTimeout(popupTimer.current), []);
+    const frames = bannerSequence(ev);
+    showStage(ev, BANNER_MS);
+    playFrames(frames, (frame) => {
+      if (frame.kind === 'break') {
+        const key = findSlotKey(boardRef.current, 'victim', ev, playerID);
+        if (key && boardRef.current?.querySelector(`[data-slot="${key}"] .card`)) {
+          setFxSlots((prev) => ({ ...prev, [key]: 'fx-break' }));
+        }
+      } else if (frame.kind === 'effect' && frame.effect === 'destroyBurn' && frame.dmg > 0) {
+        const victimId = ev.who === playerID ? opponentOf(playerID) : playerID;
+        setLifeHit((prev) => ({ ...prev, [victimId]: true }));
+        setTimeout(() => setLifeHit((prev) => ({ ...prev, [victimId]: false })), 520);
+      } else if (frame.kind === 'settle') {
+        setFxSlots({});
+        setPopup(null);
+      }
+    });
+  }, [G.fx, playerID, playFrames, rectOf]);
+
+  // ---- 回合转场：轮到谁，从哪一侧扫光进来 ----
+  const prevTurn = useRef(ctx.turn);
+  useEffect(() => {
+    if (ctx.turn === prevTurn.current) return;
+    prevTurn.current = ctx.turn;
+    if (!shouldAnimate()) return;
+    sfx.turn();
+    const t = turnTransition({ myTurn: ctx.currentPlayer === playerID });
+    setTurnFx({ dir: t.dir, key: ctx.turn });
+    const timer = setTimeout(() => setTurnFx(null), t.duration);
+    return () => clearTimeout(timer);
+  }, [ctx.turn, ctx.currentPlayer, playerID]);
+
 
   // ---- 生命值飘字 ----
   useEffect(() => {
@@ -573,6 +797,14 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
   if (ctx.gameover) {
     const iWon = ctx.gameover.winner === playerID;
     const draw = ctx.gameover.winner === null;
+    // 胜/败音效只放一次。这个分支会提前 return、挂不了 effect，
+    // 所以用 ref 按回合号记账（boardgame.io 换局不重挂组件，必须自己防重复）。
+    if (overSfxDone.current !== ctx.turn) {
+      overSfxDone.current = ctx.turn;
+      if (draw) sfx.deny();
+      else if (iWon) sfx.win();
+      else sfx.lose();
+    }
     const reasonText =
       ctx.gameover.reason === 'deck-out'
         ? '对手卡组抽干，无牌可抽'
@@ -580,7 +812,8 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
           ? '双方同时落败'
           : '生命值归零';
     return (
-      <div className="board">
+      <div className={`board is-over ${shouldAnimate() ? 'fx-on' : ''}`}>
+        {/* 终局压暗：整块战场慢慢沉下去，胜/败大字砸入（CSS 见 .over）*/}
         <div className={`over ${draw ? 'is-draw' : iWon ? 'is-win' : 'is-lose'}`}>
           <div className="over-title">{draw ? '平局' : iWon ? '胜利' : '败北'}</div>
           <div className="over-reason">{reasonText}</div>
@@ -598,15 +831,34 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
     !me.firstTurn &&
     (foe.field.every((e) => !e) || effectDirectReady);
 
+  // 演出层：给每个槽位算出稳定的 key，把 fxSlots 里的类名分发给对应槽位。
+  // 这里只读自己维护的呈现状态，不碰 me/foe 的数据。
+  const fxClassFor = (side, index) => fxSlots[`${side}-${index}`] || '';
+  const meHit = Boolean(lifeHit[playerID]);
+  const foeHit = Boolean(lifeHit[foeId]);
+
   return (
-    <div className={`board ${shake ? 'is-shake' : ''}`} onPointerDown={ensureUnlocked}>
+    <div
+      ref={boardRef}
+      className={['board', shake ? 'is-shake' : '', turnFx ? `is-turn turn-${turnFx.dir}` : '']
+        .join(' ')
+        .trim()}
+      onPointerDown={ensureUnlocked}
+    >
+      {/* 回合转场：一层扫光 + 回合字，纯装饰，pointer-events: none */}
+      {turnFx && (
+        <div className="turn-sweep" key={turnFx.key} aria-hidden="true">
+          <span className="turn-sweep-label">{myTurn ? '你的回合' : '对手回合'}</span>
+        </div>
+      )}
       {/* 对手 */}
-      <div className="pane">
+      <div className="pane" data-slot="foe-panel">
         <LifeBar
           label="对手 · 暗之决斗者"
           lp={foe.lp}
           side="foe"
           float={dmgFloat[foeId]}
+          hit={foeHit}
         />
         <div className="counts">
           <span>卡组 {foe.deck.length}</span>
@@ -623,8 +875,10 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
         {foe.field.map((entry, i) => (
           <Slot
             key={i}
+            index={i}
             entry={entry}
             side="foe"
+            fxClass={fxClassFor('foe', i)}
             highlight={selectedAtk !== null}
             onClick={selectedAtk !== null ? () => onFoeSlotClick(i) : undefined}
             onInspect={showInspect}
@@ -708,8 +962,10 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
         {me.field.map((entry, i) => (
           <Slot
             key={i}
+            index={i}
             entry={entry}
-            side="me"
+            side="my"
+            fxClass={fxClassFor('my', i)}
             highlight={selectedAtk === i}
             onClick={
               isActive && G.step === 'battle'
@@ -726,8 +982,8 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
 
       <SpellTrapRow entries={me.spellTrapZone ?? []} side="me" />
 
-      <div className="pane">
-        <LifeBar label="你 · 光之决斗者" lp={me.lp} side="me" float={dmgFloat[playerID]} />
+      <div className="pane" data-slot="my-panel">
+        <LifeBar label="你 · 光之决斗者" lp={me.lp} side="me" float={dmgFloat[playerID]} hit={meHit} />
         <div className="counts">
           <span>卡组 {me.deck.length}</span>
           <span>墓地 {me.graveyard.length}</span>
