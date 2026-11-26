@@ -515,6 +515,25 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
             // 破壁没扣血也要有「打中了」的手感
             sfx.hit();
           }
+        } else if (frame.kind === 'effect') {
+          // 效果专属演出：直击砸对方血条，其余叠在交战那张卡上。
+          // 用 key 区分「卡上的特效」与「血条上的特效」——
+          // 同毫秒可能同时有 fx-hit / fx-break / fx-eff-*，必须追加不能覆盖。
+          const targetKey = frame.who === 'panel' ? null : defenderKey;
+          setFxSlots((prev) => {
+            const next = { ...prev };
+            const key = targetKey || attackerKey;
+            const cur = next[key] || '';
+            const cls = `fx-eff-${frame.visual}`;
+            next[key] = cur.includes(cls) ? cur : `${cur} ${cls}`.trim();
+            return next;
+          });
+          if (frame.who === 'panel') {
+            // 直击：血条同样闪红（与命中帧可能重合，重复设 true 无害）
+            const victimId = ev.who === playerID ? opponentOf(playerID) : playerID;
+            setLifeHit((prev) => ({ ...prev, [victimId]: true }));
+            setTimeout(() => setLifeHit((prev) => ({ ...prev, [victimId]: false })), 520);
+          }
         } else if (frame.kind === 'break') {
           const key = frame.who === 'defender' ? defenderKey : attackerKey;
           const exists = boardRef.current?.querySelector(`[data-slot="${key}"] .card`);
@@ -578,13 +597,25 @@ export default function Board({ G, ctx, moves, playerID, isActive }) {
         if (key && boardRef.current?.querySelector(`[data-slot="${key}"] .card`)) {
           setFxSlots((prev) => ({ ...prev, [key]: 'fx-break' }));
         }
-      } else if (frame.kind === 'effect' && frame.effect === 'destroyBurn' && frame.dmg > 0) {
-        const victimId = ev.who === playerID ? opponentOf(playerID) : playerID;
-        setLifeHit((prev) => ({ ...prev, [victimId]: true }));
-        setTimeout(() => setLifeHit((prev) => ({ ...prev, [victimId]: false })), 520);
+      } else if (frame.kind === 'effect') {
+        // 灼烧：橙红火花打在对方身上，同时血条闪红。
+        // 抽牌：卡组方向飞入的视觉挂在施术者一侧（这里用版面锚点）。
+        const key = findSlotKey(boardRef.current, 'victim', ev, playerID) || null;
+        if (key) {
+          setFxSlots((prev) => {
+            const cur = prev[key] || '';
+            const cls = `fx-eff-${frame.visual}`;
+            return { ...prev, [key]: cur.includes(cls) ? cur : `${cur} ${cls}`.trim() };
+          });
+        }
+        if (frame.effect === 'destroyBurn' && frame.dmg > 0) {
+          const victimId = ev.who === playerID ? opponentOf(playerID) : playerID;
+          setLifeHit((prev) => ({ ...prev, [victimId]: true }));
+          setTimeout(() => setLifeHit((prev) => ({ ...prev, [victimId]: false })), 520);
+        }
       } else if (frame.kind === 'settle') {
         setFxSlots({});
-        setPopup(null);
+        // 同样不关弹窗：由 showStage 的计时器管，否则结果跟动画一起消失。
       }
     });
   }, [G.fx, playerID, playFrames, rectOf]);

@@ -140,6 +140,24 @@ npm run cards:import   # 重新导入图鉴数据 public/data/cards.catalog.json
 - **开关**：`localStorage['dd-fx'] = false` 可完全退回无动画行为；系统开启
   「减少动态效果」时同样降级，但保留掉血闪红这类非运动反馈。
 
+### 效果专属演出
+
+6 类怪兽效果各有视觉语言，并在**命中同一毫秒**叠在交战那张卡（或直击时叠在对方血条）上：
+
+| 效果 | 视觉类名 | 形状 |
+|---|---|---|
+| 直击 | `fx-eff-strike` | 斜切光带直砸 |
+| 贯通 | `fx-eff-lance` | 穿透箭头射出 |
+| 战斗免疫 | `fx-eff-shield` | 护盾环扩散 |
+| 战斗强化 | `fx-eff-surge` | 金色数值脉冲 |
+| 破坏灼烧 | `fx-eff-burn` | 橙红火花 |
+| 召唤抽牌 | `fx-eff-draw` | 卡背残影飞入 |
+
+引擎只有 `destroyBurn` / `summonDraw` 发独立的 `kind:'effect'` 事件，另外 4 类
+是挂在 `kind:'attack'` 上的标记字段（`direct` / `pierced` / `protected` / `boost`），
+所以由 `fx.attackEffects()` 从攻击事件派生，不依赖不存在的独立事件。
+
+
 ## 卡牌与版权
 
 302 张对局卡池的**名称、等级、攻防、属性、种族取自

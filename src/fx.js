@@ -130,6 +130,10 @@ export function attackSequence(ev) {
     // 反杀：攻击方自己炸掉，比命中稍晚一点，让「反杀」的因果读得出来
     frames.push({ at: IMPACT_MS + 60, kind: 'break', who: 'attacker', card: ev.attacker });
   }
+  // 效果专属特效：与 impact/break 同落 IMPACT_MS。
+  // 注意（上一轮踩过的坑）：同毫秒的多个帧会写同一个槽位，
+  // board 侧必须追加类名而不是整体赋值，否则后一个会冲掉前一个。
+  for (const f of attackEffectFrames(ev)) frames.push(f);
 
   frames.push({ at: ATTACK_DURATION - 160, kind: 'retreat', who: 'attacker', card: ev.attacker });
   frames.push({ at: ATTACK_DURATION, kind: 'settle' });
@@ -144,6 +148,7 @@ export function bannerSequence(ev) {
       at: 140,
       kind: 'effect',
       effect: ev.effect,
+      visual: effectVisual(ev.effect),
       dmg: typeof ev.dmg === 'number' ? ev.dmg : 0,
       draw: typeof ev.draw === 'number' ? ev.draw : 0,
     });
@@ -152,6 +157,62 @@ export function bannerSequence(ev) {
   }
   frames.push({ at: BANNER_MS, kind: 'settle' });
   return frames;
+}
+
+// ---- 效果专属演出 ---------------------------------------------------------
+// 引擎只有 destroyBurn / summonDraw 会发独立的 kind:'effect' 事件；
+// 其余 4 类效果是挂在 kind:'attack' 事件上的标记字段：
+//   direct → true（直击越过怪兽）
+//   pierced → true（贯通破壁造成伤害）
+//   protected → true（战斗免疫，未被破坏）
+//   boost → 数字（战斗中的实际攻击力）
+// 所以专属演出必须「从攻击事件派生」，不能等一个不存在的独立事件。
+
+// 从攻击事件里抽出生效的效果标记。返回空数组表示「普通战斗，没有效果参与」。
+export function attackEffects(ev) {
+  const out = [];
+  if (!ev || ev.kind !== 'attack') return out;
+  if (ev.direct) out.push('directAttack');
+  if (ev.pierced) out.push('pierce');
+  if (ev.protected) out.push('battleProtect');
+  if (typeof ev.boost === 'number' && ev.boost > 0) out.push('battleBoost');
+  return out;
+}
+
+// 效果 → 演出的视觉类别。CSS 里用 .fx-eff-<cls> 上色与做形状：
+//   lance  贯通：穿透箭头
+//   shield 免疫：护盾环
+//   surge  强化：数值脉冲
+//   strike 直击：斜切直砸
+//   burn   灼烧：橙红粒子
+//   draw   抽牌：卡背飞入
+const EFFECT_VISUAL = {
+  directAttack: 'strike',
+  pierce: 'lance',
+  battleProtect: 'shield',
+  battleBoost: 'surge',
+  destroyBurn: 'burn',
+  summonDraw: 'draw',
+};
+
+export function effectVisual(effect) {
+  return EFFECT_VISUAL[effect] || 'generic';
+}
+
+// 攻击事件里的效果特效帧：命中那一刻叠在受击/攻击方身上。
+// 多个效果同时生效（例如「贯通 + 强化」）时全部输出，由 CSS 叠加。
+export function attackEffectFrames(ev) {
+  const effects = attackEffects(ev);
+  return effects.map((effect) => ({
+    at: IMPACT_MS,
+    kind: 'effect',
+    effect,
+    visual: effectVisual(effect),
+    // 直击指向对方血条；其余效果发生在交战的那张卡上
+    who: effect === 'directAttack' ? 'panel' : 'defender',
+    dmg: typeof ev.dmg === 'number' ? ev.dmg : 0,
+    boost: typeof ev.boost === 'number' ? ev.boost : 0,
+  }));
 }
 
 // ---- 回合转场 -------------------------------------------------------------

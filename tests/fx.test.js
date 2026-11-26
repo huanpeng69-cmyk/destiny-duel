@@ -27,6 +27,9 @@ const {
   translateTo,
   scheduleFrames,
   fxEnabled,
+  attackEffects,
+  attackEffectFrames,
+  effectVisual,
   setFxEnabled,
   prefersReducedMotion,
   shouldAnimate,
@@ -225,5 +228,102 @@ test('scheduleFrames：按帧延迟派发，cancel 后不再派发', () => {
   timers.forEach((t) => t.fn());
   assert.deepEqual(seen, ['a', 'b', 'c']);
   cancel();
+  assert.ok(timers.every((t) => t.cancelled), 'cancel 必须清掉所有定时器');
+});
+
+// ---- 效果专属演出 ---------------------------------------------------------
+
+test('attackEffects：从攻击事件的标记字段抽出效果，普通战斗返回空', () => {
+  assert.deepEqual(attackEffects({ kind: 'attack', outcome: 'win' }), [], '普通战斗没有效果');
+  assert.deepEqual(attackEffects({ kind: 'attack', direct: true }), ['directAttack']);
+  assert.deepEqual(attackEffects({ kind: 'attack', pierced: true }), ['pierce']);
+  assert.deepEqual(attackEffects({ kind: 'attack', protected: true }), ['battleProtect']);
+  assert.deepEqual(attackEffects({ kind: 'attack', boost: 2400 }), ['battleBoost']);
+  // 多个效果同时生效时要全部保留（例如贯通 + 强化）
+  assert.deepEqual(
+    attackEffects({ kind: 'attack', pierced: true, boost: 2400 }),
+    ['pierce', 'battleBoost']
+  );
+  // 非攻击事件一律返回空，避免误演
+  assert.deepEqual(attackEffects({ kind: 'summon' }), []);
+  assert.deepEqual(attackEffects(null), []);
+});
+
+test('effectVisual：6 类效果各有专属视觉类别，未知效果回落 generic', () => {
+  assert.equal(effectVisual('directAttack'), 'strike');
+  assert.equal(effectVisual('pierce'), 'lance');
+  assert.equal(effectVisual('battleProtect'), 'shield');
+  assert.equal(effectVisual('battleBoost'), 'surge');
+  assert.equal(effectVisual('destroyBurn'), 'burn');
+  assert.equal(effectVisual('summonDraw'), 'draw');
+  assert.equal(effectVisual('unknownEffect'), 'generic');
+  assert.equal(effectVisual(undefined), 'generic');
+});
+
+test('attackSequence：带效果的攻击会插入 effect 帧，且序列仍以 settle 收尾', () => {
+  for (const ev of [
+    { kind: 'attack', attacker: 'a', target: null, outcome: 'direct', dmg: 700, direct: true },
+    { kind: 'attack', attacker: 'a', target: 'b', outcome: 'wall', dmg: 300, pierced: true },
+    { kind: 'attack', attacker: 'a', target: 'b', outcome: 'win', dmg: 300, protected: true },
+    { kind: 'attack', attacker: 'a', target: 'b', outcome: 'win', dmg: 500, boost: 2400 },
+  ]) {
+    const frames = attackSequence(ev);
+    assertWellFormed(frames, `effect ${ev.outcome}`);
+    assert.ok(frames.some((f) => f.kind === 'effect'), `${ev.outcome}: 必须有特效帧`);
+  }
+});
+
+test('attackSequence：普通战斗不产生 effect 帧（不误演）', () => {
+  const frames = attackSequence({ kind: 'attack', attacker: 'a', target: 'b', outcome: 'win', dmg: 800 });
+  assert.equal(frames.filter((f) => f.kind === 'effect').length, 0);
+});
+
+test('attackEffectFrames：特效帧落在命中时刻，直击指向血条、其余指向守方', () => {
+  const direct = attackEffectFrames({
+    kind: 'attack', attacker: 'a', target: null, outcome: 'direct', dmg: 700, direct: true,
+  });
+  assert.equal(direct[0].at, IMPACT_MS, '特效要与命中同帧');
+  assert.equal(direct[0].who, 'panel', '直击砸的是对方血条');
+  assert.equal(direct[0].visual, 'strike');
+
+  const pierce = attackEffectFrames({
+    kind: 'attack', attacker: 'a', target: 'b', outcome: 'wall', dmg: 300, pierced: true,
+  });
+  assert.equal(pierce[0].who, 'defender', '贯通发生在守备怪身上');
+  assert.equal(pierce[0].visual, 'lance');
+});
+
+test('attackEffectFrames：强化效果带出实际攻击力，便于在演出里标数值', () => {
+  const [f] = attackEffectFrames({
+    kind: 'attack', attacker: 'a', target: 'b', outcome: 'win', dmg: 500, boost: 2400,
+  });
+  assert.equal(f.effect, 'battleBoost');
+  assert.equal(f.boost, 2400);
+});
+
+test('attackEffectFrames：多效果同时生效时按顺序各出一帧', () => {
+  const frames = attackEffectFrames({
+    kind: 'attack', attacker: 'a', target: 'b', outcome: 'wall', dmg: 400, pierced: true, boost: 1800,
+  });
+  assert.deepEqual(frames.map((f) => f.effect), ['pierce', 'battleBoost']);
+  assert.ok(frames.every((f) => f.at === IMPACT_MS));
+});
+
+test('scheduleFrames：cancel 必须清掉所有定时器', () => {
+  const timers = [];
+  const cancel = scheduleFrames(
+    [{ at: 0, kind: 'a' }, { at: 10, kind: 'b' }],
+    () => {},
+    (fn, ms) => {
+      const t = { fn, ms, cancelled: false };
+      timers.push(t);
+      return t;
+    },
+    (t) => {
+      t.cancelled = true;
+    }
+  );
+  cancel();
+  assert.ok(timers.length > 0, '应当登记过定时器');
   assert.ok(timers.every((t) => t.cancelled), 'cancel 必须清掉所有定时器');
 });

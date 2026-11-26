@@ -247,3 +247,139 @@
   .turn-sweep { display: none; }
   .life.is-hit .life-track { box-shadow: 0 0 0 1px rgba(255, 111, 115, 0.85); }
 }
+
+/* =========================================================================
+   效果专属演出（fx-eff-*）
+   -------------------------------------------------------------------------
+   6 类怪兽效果各有自己的视觉语言，全部叠在「交战的那张卡」或「对方血条」上：
+     strike  直击    斜切光带直砸对方
+     lance   贯通    穿透箭头射出
+     shield  免疫    护盾环扩散（弹开攻击）
+     surge   强化    数值脉冲 + 光晕
+     burn    灼烧    橙红火花
+     draw    抽牌    卡背飞入的残影
+   这些类名与 fx-hit / fx-break 可能同时出现（同一毫秒多帧），
+   所以全部用「独立图层 + 自己的伪元素」，不抢 transform。
+   ========================================================================= */
+
+/* 通用容器：所有效果特效都走同一个伪元素基底 */
+.slot[class*='fx-eff-']::after,
+.life[class*='fx-eff-']::after {
+  content: '';
+  position: absolute;
+  pointer-events: none;
+  border-radius: 50%;
+  z-index: 5;
+}
+
+/* ---- 直击：斜切光带直砸对方 ---- */
+.slot.fx-eff-strike::after,
+.life.fx-eff-strike::after {
+  inset: -10%;
+  background: linear-gradient(
+    115deg,
+    transparent 38%,
+    rgba(255, 233, 163, 0.95) 47%,
+    rgba(255, 255, 255, 0.9) 52%,
+    transparent 62%
+  );
+  border-radius: 6px;
+  animation: fxEffStrike 380ms ease-out forwards;
+}
+
+@keyframes fxEffStrike {
+  0% { opacity: 0; transform: translateX(-40%) rotate(-8deg) scaleY(0.6); }
+  35% { opacity: 1; }
+  100% { opacity: 0; transform: translateX(40%) rotate(-8deg) scaleY(1.1); }
+}
+
+/* ---- 贯通：穿透箭头射出 ---- */
+.slot.fx-eff-lance::after {
+  top: 50%;
+  left: -30%;
+  width: 44px;
+  height: 3px;
+  margin-top: -1.5px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, #7ff4ff, #ffffff);
+  box-shadow: 0 0 12px rgba(127, 244, 255, 0.9);
+  animation: fxEffLance 340ms cubic-bezier(0.3, 0.9, 0.3, 1) forwards;
+}
+
+@keyframes fxEffLance {
+  0% { opacity: 0; left: -30%; }
+  30% { opacity: 1; }
+  100% { opacity: 0; left: 110%; }
+}
+
+/* ---- 免疫：护盾环扩散 ---- */
+.slot.fx-eff-shield::after {
+  inset: 4%;
+  border: 2px solid rgba(127, 244, 255, 0.85);
+  border-radius: 10px;
+  box-shadow: 0 0 18px rgba(127, 244, 255, 0.55), inset 0 0 14px rgba(127, 244, 255, 0.3);
+  animation: fxEffShield 460ms ease-out forwards;
+}
+
+@keyframes fxEffShield {
+  0% { opacity: 0; transform: scale(0.7); }
+  30% { opacity: 1; transform: scale(1.02); }
+  100% { opacity: 0; transform: scale(1.28); }
+}
+
+/* ---- 强化：数值脉冲 ---- */
+.slot.fx-eff-surge::after {
+  inset: -6%;
+  background: radial-gradient(circle, rgba(243, 207, 112, 0.55), transparent 68%);
+  animation: fxEffSurge 420ms ease-out forwards;
+}
+
+@keyframes fxEffSurge {
+  0% { opacity: 0; transform: scale(0.6); }
+  35% { opacity: 1; transform: scale(1.05); }
+  100% { opacity: 0; transform: scale(1.3); }
+}
+
+/* ---- 灼烧：橙红火花 ---- */
+.slot.fx-eff-burn::after,
+.life.fx-eff-burn::after {
+  inset: -8%;
+  background:
+    radial-gradient(circle at 35% 65%, rgba(255, 176, 84, 0.9), transparent 48%),
+    radial-gradient(circle at 68% 38%, rgba(255, 92, 60, 0.85), transparent 46%);
+  animation: fxEffBurn 460ms ease-out forwards;
+}
+
+@keyframes fxEffBurn {
+  0% { opacity: 0; transform: scale(0.5) translateY(6px); }
+  30% { opacity: 1; }
+  100% { opacity: 0; transform: scale(1.25) translateY(-10px); }
+}
+
+/* ---- 抽牌：卡背残影飞入 ---- */
+.slot.fx-eff-draw::after {
+  top: -18%;
+  left: 50%;
+  width: 26px;
+  height: 34px;
+  margin-left: -13px;
+  border-radius: 4px;
+  border: 1px solid rgba(243, 207, 112, 0.8);
+  background: linear-gradient(160deg, rgba(24, 35, 58, 0.9), rgba(10, 16, 27, 0.9));
+  animation: fxEffDraw 420ms ease-out forwards;
+}
+
+@keyframes fxEffDraw {
+  0% { opacity: 0; transform: translateY(-24px) scale(0.7); }
+  35% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(34px) scale(1); }
+}
+
+/* ---- 效果特效的降级 ---- */
+@media (prefers-reduced-motion: reduce) {
+  .slot[class*='fx-eff-']::after,
+  .life[class*='fx-eff-']::after {
+    animation: none !important;
+    opacity: 0;
+  }
+}
