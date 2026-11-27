@@ -5,7 +5,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DestinyDuel } from '../src/game.js';
-import { CARD_CATALOG } from '../src/cards.js';
+import { CARD_CATALOG, CARDS } from '../src/cards.js';
 import { Client } from 'boardgame.io/dist/esm/client.js';
 import { Local } from 'boardgame.io/dist/esm/multiplayer.js';
 import { changePositionBlocked } from '../src/hints.js';
@@ -166,6 +166,54 @@ test('银河旋风在对方场上无怪兽时拒绝发动', () => {
   c.moves.castSpell(0);
   assert.equal(g(c).players['0'].hand.length, 1, '手牌不应减少');
   c.stop();
+});
+
+// 展示层漂移回归：战报文案里的卡名必须取自 CARDS[id].cn，不另写一份。
+// 曾经战报写「贪杯之瓶 / 恩惠的抽卡 / 银河旋风」，卡面却是
+// 「强欲之壶 / 天使的施舍 / 旋风」—— 同一张卡两套名字，玩家会以为是两张牌。
+test('战报里的魔法卡名与卡面中文名一致（防展示层漂移）', () => {
+  const cases = [
+    {
+      id: 'potOfGreed',
+      p0: mk({ hand: ['potOfGreed'], deck: ['geminiElf', 'gearfried', 'redEyes'] }),
+      p1: mk(),
+    },
+    {
+      id: 'gracefulCharity',
+      p0: mk({ hand: ['gracefulCharity'], deck: ['geminiElf', 'gearfried', 'redEyes'] }),
+      p1: mk(),
+    },
+    {
+      id: 'typhoon',
+      p0: mk({ hand: ['typhoon'] }),
+      p1: mk({ field: [{ card: 'geminiElf', attacked: false }, null, null, null, null] }),
+    },
+    {
+      id: 'monsterReborn',
+      p0: mk({ hand: ['monsterReborn'], graveyard: ['geminiElf'] }),
+      p1: mk(),
+    },
+    {
+      id: 'swordsOfLight',
+      p0: mk({ hand: ['swordsOfLight'] }),
+      p1: mk(),
+    },
+  ];
+
+  for (const { id, p0, p1 } of cases) {
+    const c = clientWith(p0, p1);
+    c.moves.castSpell(0);
+    const cast = g(c).log.filter((e) => e.text.startsWith('发动'));
+    assert.equal(cast.length, 1, `${id}: 应当恰好有一条「发动」战报`);
+    assert.ok(
+      cast[0].text.includes(CARDS[id].cn),
+      `${id}: 战报应含卡面名「${CARDS[id].cn}」，实际是「${cast[0].text}」`
+    );
+    for (const stale of ['贪杯之瓶', '恩惠的抽卡', '银河旋风']) {
+      assert.ok(!cast[0].text.includes(stale), `${id}: 战报不该出现旧名「${stale}」`);
+    }
+    c.stop();
+  }
 });
 
 test('死者苏生从墓地特殊召唤，不占通常召唤次数', () => {

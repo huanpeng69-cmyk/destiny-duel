@@ -401,14 +401,14 @@ export const DestinyDuel = {
         switch (card.effect) {
           case 'draw2':
             drawCards(G, playerID, 2);
-            say(G, playerID, '发动贪杯之瓶，抽 2 张牌。', {
+            say(G, playerID, `发动${card.cn}，抽 2 张牌。`, {
               kind: 'spell', card: cardId, effect: 'draw2',
             });
             break;
 
           case 'draw3':
             drawCards(G, playerID, 3);
-            say(G, playerID, '发动恩惠的抽卡，抽 3 张牌。', {
+            say(G, playerID, `发动${card.cn}，抽 3 张牌。`, {
               kind: 'spell', card: cardId, effect: 'draw3',
             });
             break;
@@ -419,7 +419,7 @@ export const DestinyDuel = {
             const victim = CARDS[opp.field[slot].card].cn;
             const victimId = opp.field[slot].card;
             destroyMonster(G, oppId, slot);
-            say(G, playerID, `发动银河旋风，破坏 ${victim}。`, {
+            say(G, playerID, `发动${card.cn}，破坏 ${victim}。`, {
               kind: 'spell', card: cardId, effect: 'destroy', victim: victimId,
             });
             break;
@@ -434,7 +434,7 @@ export const DestinyDuel = {
             if (gi === -1) return INVALID_MOVE; // 墓地里没有怪兽
             const revived = p.graveyard.splice(gi, 1)[0];
             p.field[slot] = { card: revived, attacked: false, pos: 'attack' };
-            say(G, playerID, `发动死者苏生，特殊召唤 ${CARDS[revived].cn}。`, {
+            say(G, playerID, `发动${card.cn}，特殊召唤 ${CARDS[revived].cn}。`, {
               kind: 'spell', card: cardId, effect: 'reborn', victim: revived,
             });
             // 死者苏生也是「从墓地的特殊召唤」→ 同样触发 summonDraw
@@ -444,7 +444,7 @@ export const DestinyDuel = {
 
           case 'lockdown':
             opp.lockedUntil = ctx.turn + 2;
-            say(G, playerID, '发动光之护封剑，对手下个回合无法攻击。', {
+            say(G, playerID, `发动${card.cn}，对手下个回合无法攻击。`, {
               kind: 'spell', card: cardId, effect: 'lockdown',
             });
             break;

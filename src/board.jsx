@@ -55,8 +55,9 @@ function findSlotKey(root, role, ev, playerID) {
 }
 
 // ---- 卡面 ----
-// 图片可选：public/cards/<id>.jpg 存在就盖在 CSS 卡面上，不存在就露出
-// CSS 卡面。onError 隐藏 img，因此缺图不影响任何功能。
+// 卡图来源：卡池数据里的 imageUrlSmall（ygoprodeck 缩略图，运行时按需加载）。
+// 没有本地覆盖路径 —— public/cards/ 目录当前不参与任何解析。
+// onError 把 img 隐藏，因此离线或缺图时露出 CSS 卡面，功能不受影响。
 function CardFace({ cardId, size = 'md' }) {
   const card = CARDS[cardId];
   if (!card) return null;

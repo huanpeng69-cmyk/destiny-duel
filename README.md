@@ -18,7 +18,7 @@ Windows：**双击 `start-game.bat`** 即可自动装依赖、启动并打开浏
 ```bash
 npm install
 npm run dev     # http://localhost:5173
-npm test        # 144 个测试
+npm test        # 153 个测试
 npm run build
 ```
 
@@ -164,23 +164,21 @@ npm run cards:import   # 重新导入图鉴数据 public/data/cards.catalog.json
 [ygoprodeck.com](https://ygoprodeck.com/) 公开卡牌数据库**（事实性游戏数据）。
 效果描述是为新手重写的口语化版本，与原作效果文本不同。
 
-卡牌插画是 Konami 的版权作品。本项目**不附带、不下载、不分发**任何官方插画。
-卡面默认由 CSS 绘制。若你拥有有权使用的图片（例如自己实体卡收藏的扫描件），
-按 `public/cards/README.md` 的文件名放进该目录即可自动加载，无需改任何代码；
-没有图片时游戏功能完全不受影响。
+卡牌插画是 Konami 的版权作品。本项目**不附带、不分发**任何插画文件；
+对局与图鉴在运行时直接引用 ygoprodeck.com 的缩略图
+（`images.ygoprodeck.com`，URL 存在卡池数据的 `imageUrlSmall` 字段里）。
+离线、被拦截或单张加载失败时自动回落到纯 CSS 绘制的卡面，游戏功能完全不受影响。
 
 本项目为非官方 fan project，与 Konami 无关联。
 
-## 放入自己的卡面图
+## 卡面图的行为
 
-```
-public/cards/blueEyes.jpg
-public/cards/darkMagician.jpg
-...
-```
+当前实现只有一条路径：**用卡池数据里的远端缩略图**，失败则露出 CSS 卡面
+（`board.jsx` 的 `CardFace` 用 `onError` 把 `<img>` 隐藏）。
 
-文件存在就用图，不存在自动回落到 CSS 卡面。完整文件名对照见
-`public/cards/README.md`。
+`public/cards/<id>.jpg` 这种本地覆盖**尚未实现**——代码里没有任何地方读这个目录。
+如果你想用自己有权使用的图片（例如实体卡扫描件）替换远端图，需要先加上本地
+优先的解析逻辑，属于待办而不是现成功能。
 
 ## 结构
 
@@ -207,11 +205,11 @@ scripts/
 ├── import-ygoprodeck.mjs   导入图鉴数据
 └── import-zh-cards.mjs     导入中文译名
 
-tests/  （node --test，共 144 项）
-├── game.test.js       42  规则：召唤/祭品/魔法/战斗/直击/破壁/胜负/回合钩子/秘密状态
+tests/  （node --test，共 153 项）
+├── game.test.js       43  规则：召唤/祭品/魔法/战斗/直击/破壁/胜负/回合钩子/秘密状态
 ├── effects.test.js    24  效果：move 级集成断言（贯通扣血、直击越怪、灼烧、祭品不误触发）
 ├── tutorial.test.js   21  指引：步骤数据、定位数学、done 谓词、board.jsx 接线
-├── fx.test.js         22  演出：帧序列时序、位移计算、开关与 reduce-motion、调度器
+├── fx.test.js         30  演出：帧序列时序、位移计算、效果派生、开关与 reduce-motion
 ├── bot.test.js        10  AI：召唤评分、守备化决策、走真实 move 落地
 ├── fullgame.test.js    9  整局不收敛/卡死兜网 + 状态不变量 + 先发随机性
 ├── cards.test.js       8  卡池合法性与每局随机牌组
@@ -388,9 +386,9 @@ bot 总先把名额用在召唤上，「名额还在却无怪可召」的窗口�
 
 ## 测试覆盖
 
-144 个测试，`npm test` 全绿：
+153 个测试，`npm test` 全绿：
 
-- **规则（42）**：4 星免祭品、7 星需 2 祭品（不足拒绝、齐备成功且祭品入墓）、
+- **规则（43）**：4 星免祭品、7 星需 2 祭品（不足拒绝、齐备成功且祭品入墓）、
   每回合限 1 次、不能召唤魔法卡；魔法抽 2 / 抽 3 / 破坏对方最强 / 死者苏生不占次数 /
   无怪兽时拒绝 / 护封剑锁定下回合；战斗（攻对攻、攻对防、攻低被反杀、同攻同归于尽、
   对方有怪兽时禁直击、空场可直击、同一只每回合限 1 次、主要阶段不能攻击）；
